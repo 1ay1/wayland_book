@@ -1,0 +1,148 @@
+% Introduction
+
+\chapter*{Introduction}
+\addcontentsline{toc}{chapter}{Introduction}
+
+\section*{The Display Server Revolution}
+
+Every revolution in computing begins quietly. A few developers, frustrated with the status quo, start asking: "What if we rebuilt this from scratch?" For Linux graphics, that revolution is Wayland.
+
+In 2008, when Kristian Høgsberg first proposed Wayland, the X Window System had been the foundation of Unix graphics for over two decades. X11 was mature, stable, and well-understood. It powered everything from simple terminal emulators to complex desktop environments. Why replace it?
+
+The answer lies not in what X11 did wrong, but in how fundamentally the computing world had changed.
+
+\section*{A Changed World}
+
+When X11 was designed in the mid-1980s, the computing landscape looked nothing like today:
+
+\paragraph{Network Transparency Was Essential} Workstations were expensive and shared. Running applications remotely over the network wasn't just convenient—it was economically necessary. X11's architecture reflected this: it was designed as a network protocol first, with local display as a special case.
+
+\paragraph{Graphics Hardware Was Simple} A graphics card in 1984 was essentially a framebuffer—a chunk of memory that mapped directly to pixels on screen. There was no GPU acceleration, no 3D graphics, no video decoding hardware. The X server managed this simple hardware and provided software rendering primitives.
+
+\paragraph{Security Was Different} Computers were shared, but users were known and trusted. The idea that arbitrary applications might try to steal passwords, capture screenshots, or inject fake input wasn't a primary concern. X11's security model—or lack thereof—reflected this trust.
+
+\paragraph{Window Management Was Separate} The display server drew pixels. The window manager arranged windows. Desktop environments hadn't been invented yet. This separation seemed clean and elegant.
+
+Fast forward to today:
+
+\begin{itemize}
+    \item Most desktop applications run locally, not over networks
+    \item GPUs are more powerful than the CPUs of the 1980s
+    \item Every application is a potential security threat
+    \item Compositing (drawing all windows into a buffer before displaying) is standard
+    \item Users expect smooth animations, transparency effects, and pixel-perfect rendering
+    \item Touch screens, high-DPI displays, and multi-monitor setups are common
+\end{itemize}
+
+X11 adapted to these changes through extensions—lots of extensions. But each adaptation added complexity, and the fundamental architecture remained unchanged. The cracks were showing.
+
+\section*{The Wayland Insight}
+
+Wayland's fundamental insight is deceptively simple: \textbf{the compositor is the display server}.
+
+In modern X11, the actual display server—the X server itself—does surprisingly little. A compositor (like Compiz or Mutter) intercepts all the windows, combines them into a single image with effects and transparency, and sends that to the X server. The X server has become little more than a pass-through.
+
+Wayland eliminates this redundancy. The compositor renders everything and talks directly to the kernel's display infrastructure (DRM/KMS). There's no separate display server sitting in the middle.
+
+This isn't just about efficiency (though that helps). It's about clarity of design:
+
+\begin{itemize}
+    \item \textbf{One component, one responsibility} — The compositor manages windows, routes input, and controls the display. No split responsibilities.
+
+    \item \textbf{Security by architecture} — Applications can't see each other's windows or inject events into each other. The compositor mediates all interactions.
+
+    \item \textbf{Modern graphics first} — Designed from day one for GPU-accelerated compositing, not adapted to it through extensions.
+
+    \item \textbf{Simpler codebase} — The core Wayland protocol is orders of magnitude smaller than X11's.
+\end{itemize}
+
+\section*{What Wayland Is and Isn't}
+
+Before we go further, let's clarify what Wayland actually is:
+
+\paragraph{Wayland IS:}
+\begin{itemize}
+    \item A \textbf{protocol} specification describing how applications (clients) communicate with compositors (servers)
+    \item A \textbf{library} (libwayland) implementing the low-level protocol mechanics
+    \item An \textbf{architecture} for building modern display servers
+    \item A \textbf{ecosystem} of protocols, compositors, and tools
+\end{itemize}
+
+\paragraph{Wayland IS NOT:}
+\begin{itemize}
+    \item A single program you can install
+    \item A window manager or desktop environment
+    \item A replacement you "switch to"—you switch to a Wayland compositor
+    \item A complete specification of all desktop functionality (unlike X11, many things are compositor-specific)
+\end{itemize}
+
+This last point is crucial and often misunderstood. X11 tried to specify everything—how windows should be managed, how clipboards work, how window decorations should look. Wayland specifies only the core protocol. Many policy decisions are left to compositors.
+
+Is this a bug or a feature? It's intentional. Wayland's philosophy is that different environments have different needs. A desktop environment like GNOME has different requirements than a tiling window manager like Sway, which has different needs than an embedded kiosk system. Rather than forcing one-size-fits-all solutions, Wayland provides the foundation and lets compositors make appropriate choices.
+
+\section*{The Transition Challenge}
+
+If Wayland is so much better, why hasn't everyone switched?
+
+The truth is: many have. As of this writing, major Linux distributions ship Wayland sessions by default. GNOME, KDE Plasma, and many other environments support Wayland. But the transition is gradual, and for good reason.
+
+\paragraph{Backwards Compatibility} Decades of X11 applications exist. XWayland—an X11 server running as a Wayland client—provides compatibility, but it's not perfect and adds complexity.
+
+\paragraph{Feature Parity} Some X11 features don't have direct Wayland equivalents. Screen recording, remote desktop access, and global hotkeys all work differently. New protocols are being developed, but reaching consensus takes time.
+
+\paragraph{Ecosystem Maturity} Nvidia's proprietary drivers took years to support Wayland properly. Various toolkits needed updates. Desktop environments had to be ported. This work is largely done now, but it took time.
+
+\paragraph{Learning Curve} For developers, Wayland requires learning new concepts and approaches. This book aims to ease that learning curve.
+
+\section*{Why Learn Wayland Now?}
+
+Even if the transition isn't complete, Wayland is clearly the future of Linux graphics:
+
+\paragraph{Adoption Is Accelerating} Major distributions default to Wayland. Hardware vendors optimize for it. Application developers target it.
+
+\paragraph{New Features First} HDR support, VRR (variable refresh rate), better color management—new graphics features are being developed for Wayland first.
+
+\paragraph{Better Architecture} Understanding Wayland means understanding modern display server design. Even if you never write Wayland code, these concepts apply broadly.
+
+\paragraph{Opportunity} The Wayland ecosystem is young enough that individual developers can still make significant contributions. Writing a custom compositor is achievable. Extending protocols is possible. The future isn't set in stone.
+
+\section*{The Journey Ahead}
+
+This book will take you on a comprehensive journey through Wayland:
+
+We'll start by understanding the fundamental problems display servers solve and how X11 addressed them. This context is essential—you can't appreciate Wayland's design without understanding what it's replacing.
+
+Then we'll dive into Wayland's philosophy and architecture. Why is the protocol designed this way? What trade-offs were made? What problems does this solve?
+
+From there, we'll go deep into the technical details: the protocol itself, compositor architecture, the graphics pipeline, input handling, and practical implementation.
+
+Finally, we'll explore advanced topics and study real-world compositors to see how theory becomes practice.
+
+\section*{A Living System}
+
+One final note: Wayland is not frozen in time. New protocols are proposed and debated. Compositors experiment with different approaches. Best practices evolve. This book captures the state of Wayland as of this writing, but the ecosystem continues to grow.
+
+That's not a limitation—it's exciting. You're learning about a system that's still being actively shaped. Your insights and contributions could influence its future direction.
+
+\section*{Getting Started}
+
+Each chapter in this book builds on the previous ones, but they're also designed to be somewhat self-contained for reference use. If you're new to display servers, I recommend reading straight through. If you're already familiar with the basics, feel free to jump to the sections most relevant to your needs.
+
+Code examples are provided throughout. I encourage you to not just read them, but to type them out, modify them, and experiment. Understanding comes from doing.
+
+\section*{The Path Forward}
+
+The shift from X11 to Wayland represents more than just a technical upgrade. It's a rethinking of fundamental assumptions about how display servers should work. It's a recognition that the best way forward sometimes means starting fresh rather than endlessly patching the old.
+
+This is the story of that rethinking. This is the story of Wayland.
+
+Let's begin.
+
+\vspace{2cm}
+
+\begin{center}
+\textit{``The future is already here—it's just not evenly distributed yet.''}\\
+\textit{— William Gibson}
+\end{center}
+
+\clearpage

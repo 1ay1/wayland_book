@@ -1,0 +1,736 @@
+\chapter{Design Principles}
+\label{ch:design-principles}
+
+\epigraph{Design is not just what it looks like and feels like. Design is how it works.}{--- Steve Jobs}
+
+\section{Introduction}
+
+In the previous chapter, we explored Wayland's overarching philosophy—the "why" behind its design. This chapter dives deeper into specific design principles—the "how" that translates philosophy into concrete technical decisions.
+
+These principles guide everything from protocol message formats to buffer management strategies. They explain why Wayland does things differently from X11 and why certain features are included while others are deliberately omitted.
+
+Understanding these principles is essential for:
+\begin{itemize}
+    \item Building Wayland compositors that align with the ecosystem
+    \item Writing applications that work well with Wayland's model
+    \item Contributing to protocol development
+    \item Debugging issues by understanding expected behavior
+\end{itemize}
+
+\section{The Client-Server Model Refined}
+
+\subsection{Traditional Understanding}
+
+In traditional client-server architecture:
+\begin{itemize}
+    \item \textbf{Server}: Centralized, manages resources, serves many clients
+    \item \textbf{Client}: Connects to server, makes requests, receives responses
+\end{itemize}
+
+X11 followed this model: the X server managed display and input, applications were clients.
+
+\subsection{Wayland's Inverted Naming}
+
+Wayland uses the same terminology but with a crucial difference:
+\begin{itemize}
+    \item \textbf{Wayland compositor}: Often called the "server" (implements server-side protocol)
+    \item \textbf{Applications}: Called "clients" (implement client-side protocol)
+\end{itemize}
+
+But conceptually, this is inverted from X11:
+\begin{itemize}
+    \item Applications \textit{provide} content (they're content servers)
+    \item Compositor \textit{consumes} content (it's a content client)
+\end{itemize}
+
+The compositor requests frames from applications, not the other way around.
+
+\begin{notebox}
+This terminology can be confusing. Just remember: "Wayland server" = compositor, "Wayland client" = application. The protocol defines who sends what messages, regardless of the conceptual relationship.
+\end{notebox}
+
+\subsection{Symmetric Communication}
+
+Unlike traditional client-server where clients only send requests and servers only send responses, Wayland communication is symmetric:
+
+\begin{itemize}
+    \item Clients can send requests (create surface, attach buffer)
+    \item Server sends events (configure surface, input events)
+    \item Both can initiate communication
+    \item No strict request-response pattern
+\end{itemize}
+
+This enables:
+\begin{itemize}
+    \item Asynchronous operation (no blocking on server responses)
+    \item Event-driven architecture (server pushes events to clients)
+    \item Efficient pipelining (send multiple requests without waiting)
+\end{itemize}
+
+\section{Object-Oriented Protocol Design}
+
+\subsection{Everything Is an Object}
+
+Wayland's protocol is object-oriented:
+\begin{itemize}
+    \item Every resource is represented by an object
+    \item Objects have types (interfaces)
+    \item Objects have methods (requests from client)
+    \item Objects have events (notifications from server)
+    \item Objects have unique IDs
+    \item Objects have lifecycles (created and destroyed)
+\end{itemize}
+
+\begin{examplebox}
+\textbf{Example Objects}
+
+\begin{itemize}
+    \item \texttt{wl\_surface}: Represents a rectangular area for displaying content
+    \item \texttt{wl\_buffer}: Represents a buffer containing pixel data
+    \item \texttt{wl\_keyboard}: Represents a keyboard device
+    \item \texttt{wl\_output}: Represents a display output
+\end{itemize}
+
+Each has specific requests and events defined by its interface.
+\end{examplebox}
+
+\subsection{Object Creation and Binding}
+
+Objects are created in two ways:
+
+\paragraph{Server-Advertised Objects}
+The compositor advertises global objects via the registry:
+
+\begin{lstlisting}[style=cstyle, caption=Registry Events]
+struct wl_registry_listener registry_listener = {
+    .global = registry_global,
+    .global_remove = registry_global_remove
+};
+
+static void registry_global(void *data,
+                           struct wl_registry *registry,
+                           uint32_t name,
+                           const char *interface,
+                           uint32_t version) {
+    // Compositor advertises: "I support wl_compositor v4"
+    if (strcmp(interface, wl_compositor_interface.name) == 0) {
+        compositor = wl_registry_bind(registry, name,
+                                     &wl_compositor_interface,
+                                     4);
+    }
+}
+\end{lstlisting}
+
+\paragraph{Client-Created Objects}
+Clients create objects via factory requests:
+
+\begin{lstlisting}[style=cstyle, caption=Creating a Surface]
+// Use compositor object to create surface object
+struct wl_surface *surface =
+    wl_compositor_create_surface(compositor);
+\end{lstlisting}
+
+\subsection{Object References and Lifecycle}
+
+\paragraph{Reference Passing}
+Objects can be passed as arguments to requests and events:
+
+\begin{lstlisting}[style=cstyle, caption=Object References]
+// Attach buffer to surface (passing buffer object reference)
+wl_surface_attach(surface, buffer, 0, 0);
+
+// Configure event passes surface reference
+void configure_handler(void *data,
+                      struct xdg_surface *xdg_surface,
+                      uint32_t serial) {
+    // xdg_surface is the object being configured
+}
+\end{lstlisting}
+
+\paragraph{Explicit Destruction}
+Objects must be explicitly destroyed:
+
+\begin{lstlisting}[style=cstyle, caption=Object Destruction]
+wl_surface_destroy(surface);
+wl_buffer_destroy(buffer);
+\end{lstlisting}
+
+Some objects have special destruction protocols (surfaces must be destroyed in specific states).
+
+\subsection{Interface Versioning}
+
+Interfaces have versions that can evolve over time:
+
+\begin{itemize}
+    \item Version 1: Initial interface
+    \item Version 2: Adds new requests/events (backwards compatible)
+    \item Version 3: Adds more features
+\end{itemize}
+
+Clients and servers negotiate the version to use:
+
+\begin{lstlisting}[style=cstyle, caption=Version Negotiation]
+// Client can use up to version 4
+#define WL_COMPOSITOR_VERSION 4
+
+compositor = wl_registry_bind(registry, name,
+                             &wl_compositor_interface,
+                             MIN(version, WL_COMPOSITOR_VERSION));
+\end{lstlisting}
+
+\begin{designbox}
+\textbf{Design Principle: Forward Compatibility}
+
+New versions must be backwards compatible. An old client should work with a new server, and a new client should gracefully handle an old server. This enables incremental upgrades across the ecosystem.
+\end{designbox}
+
+\section{Asynchronous by Default}
+
+\subsection{The Problem with Synchronous Communication}
+
+X11's synchronous operations block the client:
+
+\begin{lstlisting}[style=cstyle, caption=X11 Blocking Call]
+// Client stops and waits for server response
+XWindowAttributes attrs;
+XGetWindowAttributes(display, window, &attrs);
+// Only now can we continue
+\end{lstlisting}
+
+This adds latency and reduces throughput.
+
+\subsection{Wayland's Asynchronous Model}
+
+Wayland operations are asynchronous by default:
+
+\begin{lstlisting}[style=cstyle, caption=Asynchronous Wayland]
+// Request sent, client continues immediately
+wl_surface_attach(surface, buffer, 0, 0);
+wl_surface_damage(surface, 0, 0, width, height);
+wl_surface_commit(surface);
+
+// Client can keep working, compositor processes in parallel
+prepare_next_frame();
+\end{lstlisting}
+
+\subsection{Event-Driven Responses}
+
+Instead of waiting for responses, clients register event handlers:
+
+\begin{lstlisting}[style=cstyle, caption=Event Handlers]
+struct wl_surface_listener surface_listener = {
+    .enter = surface_enter,
+    .leave = surface_leave
+};
+
+wl_surface_add_listener(surface, &surface_listener, data);
+
+// Later, when surface enters an output:
+static void surface_enter(void *data,
+                         struct wl_surface *surface,
+                         struct wl_output *output) {
+    // Handle event asynchronously
+}
+\end{lstlisting}
+
+\subsection{Synchronization When Needed}
+
+When synchronization is necessary, explicit mechanisms exist:
+
+\paragraph{wl\_callback for Frame Synchronization}
+\begin{lstlisting}[style=cstyle, caption=Frame Callbacks]
+struct wl_callback *callback = wl_surface_frame(surface);
+wl_callback_add_listener(callback, &frame_listener, data);
+wl_surface_commit(surface);
+
+// Compositor signals when it's ready for next frame
+static void frame_done(void *data,
+                      struct wl_callback *callback,
+                      uint32_t time) {
+    // Now render next frame
+}
+\end{lstlisting}
+
+\paragraph{wl\_display\_roundtrip for Synchronization Points}
+\begin{lstlisting}[style=cstyle, caption=Forced Synchronization]
+// Send all pending requests and wait for server to process
+wl_display_roundtrip(display);
+// Now we know all previous requests have been processed
+\end{lstlisting}
+
+Used sparingly for critical synchronization points (initialization, cleanup).
+
+\section{Double Buffering and Atomicity}
+
+\subsection{The Frame Update Problem}
+
+How do you update a window's contents without the user seeing intermediate states?
+
+\paragraph{Naive Approach (Bad)}
+\begin{lstlisting}[style=cstyle, caption=Non-Atomic Updates]
+// User might see window in intermediate states
+clear_window();           // Window briefly blank
+draw_background();        // Window has only background
+draw_widgets();           // Widgets appear one by one
+draw_text();             // Finally complete
+\end{lstlisting}
+
+This causes flashing and visual artifacts.
+
+\subsection{Double Buffering}
+
+Wayland uses double buffering:
+
+\begin{enumerate}
+    \item Application renders to an off-screen buffer (back buffer)
+    \item When complete, buffer is sent to compositor
+    \item Compositor displays it (front buffer)
+    \item Application starts rendering next frame to another buffer
+\end{enumerate}
+
+The user only sees complete frames.
+
+\subsection{The Commit Mechanism}
+
+Surface state changes are batched and applied atomically via \texttt{commit}:
+
+\begin{lstlisting}[style=cstyle, caption=Atomic State Updates]
+// Prepare state changes (not visible yet)
+wl_surface_attach(surface, buffer, 0, 0);
+wl_surface_damage(surface, 0, 0, width, height);
+wl_surface_set_buffer_scale(surface, 2);
+
+// Atomically apply all changes
+wl_surface_commit(surface);
+\end{lstlisting}
+
+All changes take effect simultaneously. The compositor never sees intermediate states.
+
+\subsection{Pending vs. Current State}
+
+Each surface has two states:
+
+\paragraph{Pending State}
+Modified by requests:
+\begin{itemize}
+    \item \texttt{wl\_surface\_attach}: Sets pending buffer
+    \item \texttt{wl\_surface\_damage}: Sets pending damage
+    \item \texttt{wl\_surface\_set\_opaque\_region}: Sets pending opaque region
+\end{itemize}
+
+\paragraph{Current State}
+Activated by \texttt{commit}:
+\begin{itemize}
+    \item Pending state becomes current
+    \item Compositor uses current state for display
+    \item New pending state can be prepared
+\end{itemize}
+
+\begin{designbox}
+\textbf{Design Principle: Atomic Updates}
+
+Every visible state change must be atomic. Users should never see inconsistent or intermediate states. This ensures visual quality and enables predictable compositing.
+\end{designbox}
+
+\section{Damage Tracking and Partial Updates}
+
+\subsection{The Efficiency Problem}
+
+Redrawing the entire screen every frame is wasteful:
+\begin{itemize}
+    \item Most content doesn't change
+    \item Bandwidth and GPU time are wasted
+    \item Power consumption increases
+\end{itemize}
+
+\subsection{Damage Regions}
+
+Applications report which regions changed:
+
+\begin{lstlisting}[style=cstyle, caption=Reporting Damage]
+// Only this rectangle changed
+wl_surface_damage(surface, x, y, width, height);
+wl_surface_commit(surface);
+\end{lstlisting}
+
+\subsection{Compositor Optimization}
+
+The compositor can optimize based on damage:
+\begin{itemize}
+    \item Only re-composite damaged regions
+    \item Only update affected screen areas
+    \item Skip unchanged layers in composition
+\end{itemize}
+
+\subsection{Buffer Damage vs. Surface Damage}
+
+Two types of damage:
+
+\paragraph{Surface Damage}
+Regions that changed since last commit (surface coordinates):
+\begin{lstlisting}[style=cstyle]
+wl_surface_damage(surface, x, y, width, height);
+\end{lstlisting}
+
+\paragraph{Buffer Damage}
+Regions that changed in the buffer (buffer coordinates):
+\begin{lstlisting}[style=cstyle]
+wl_surface_damage_buffer(surface, x, y, width, height);
+\end{lstlisting}
+
+Buffer damage accounts for buffer transforms and scales.
+
+\begin{notebox}
+Modern applications should use \texttt{wl\_surface\_damage\_buffer} as it's more precise when buffer scale or transforms are involved.
+\end{notebox}
+
+\section{Buffer Management}
+
+\subsection{Buffer Lifecycle}
+
+Buffers have a complex lifecycle:
+
+\begin{enumerate}
+    \item \textbf{Client allocates}: Allocate memory for pixels
+    \item \textbf{Client renders}: Draw content into buffer
+    \item \textbf{Client attaches}: Attach buffer to surface
+    \item \textbf{Client commits}: Make buffer current
+    \item \textbf{Compositor uses}: Compositor reads buffer for display
+    \item \textbf{Compositor releases}: Compositor signals done with buffer
+    \item \textbf{Client reuses or destroys}: Client can reuse or free buffer
+\end{enumerate}
+
+\subsection{Buffer Busy State}
+
+Once committed, buffers are "busy" until released:
+
+\begin{lstlisting}[style=cstyle, caption=Buffer Release]
+struct wl_buffer_listener buffer_listener = {
+    .release = buffer_release
+};
+
+wl_buffer_add_listener(buffer, &buffer_listener, data);
+
+static void buffer_release(void *data,
+                          struct wl_buffer *buffer) {
+    // Compositor is done, buffer can be reused
+    mark_buffer_available(buffer);
+}
+\end{lstlisting}
+
+\begin{warningbox}
+Never modify a buffer that hasn't been released. The compositor may still be reading it. Violating this causes visual corruption or crashes.
+\end{warningbox}
+
+\subsection{Multiple Buffers}
+
+Applications typically use 2-3 buffers:
+
+\paragraph{Double Buffering}
+\begin{itemize}
+    \item Buffer 1: Being displayed
+    \item Buffer 2: Being rendered
+\end{itemize}
+
+\paragraph{Triple Buffering}
+\begin{itemize}
+    \item Buffer 1: Being displayed
+    \item Buffer 2: Waiting to be displayed
+    \item Buffer 3: Being rendered
+\end{itemize}
+
+Triple buffering reduces latency when frame times vary.
+
+\subsection{Buffer Types}
+
+Multiple buffer types exist:
+
+\paragraph{wl\_shm (Shared Memory)}
+CPU-accessible pixel buffers:
+\begin{lstlisting}[style=cstyle, caption=Shared Memory Buffer]
+struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+struct wl_buffer *buffer = wl_shm_pool_create_buffer(
+    pool, offset, width, height, stride, format);
+\end{lstlisting}
+
+Simple but slower (CPU rendering, must be uploaded to GPU).
+
+\paragraph{dmabuf (GPU Buffers)}
+GPU-accessible buffers for zero-copy:
+\begin{lstlisting}[style=cstyle, caption=DMA-BUF]
+struct zwp_linux_buffer_params_v1 *params =
+    zwp_linux_dmabuf_v1_create_params(dmabuf);
+
+zwp_linux_buffer_params_v1_add(params, fd, plane_idx,
+                               offset, stride, modifier_hi,
+                               modifier_lo);
+
+struct wl_buffer *buffer =
+    zwp_linux_buffer_params_v1_create_immed(
+        params, width, height, format, flags);
+\end{lstlisting}
+
+Efficient for GPU-rendered content.
+
+\section{Input Focus and Event Routing}
+
+\subsection{Explicit Focus Model}
+
+Unlike X11, Wayland input focus is explicit and compositor-controlled:
+
+\begin{itemize}
+    \item Compositor decides which surface has keyboard focus
+    \item Compositor decides which surface receives pointer events
+    \item Applications cannot steal focus
+    \item Applications cannot send input to other applications
+\end{itemize}
+
+\subsection{Enter/Leave Events}
+
+Input devices send enter/leave events when focus changes:
+
+\begin{lstlisting}[style=cstyle, caption=Keyboard Focus]
+struct wl_keyboard_listener keyboard_listener = {
+    .enter = keyboard_enter,
+    .leave = keyboard_leave,
+    .key = keyboard_key,
+    // ...
+};
+
+static void keyboard_enter(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface,
+                          struct wl_array *keys) {
+    // This surface now has keyboard focus
+}
+
+static void keyboard_leave(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface) {
+    // This surface lost keyboard focus
+}
+\end{lstlisting}
+
+\subsection{Serial Numbers}
+
+Events include serial numbers for request authentication:
+
+\begin{lstlisting}[style=cstyle, caption=Serial-Based Authentication]
+// Pointer button event includes serial
+static void pointer_button(void *data,
+                          struct wl_pointer *pointer,
+                          uint32_t serial,
+                          uint32_t time,
+                          uint32_t button,
+                          uint32_t state) {
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        // Use serial to authenticate popup creation
+        xdg_popup_grab(popup, seat, serial);
+    }
+}
+\end{lstlisting}
+
+Serials prevent applications from performing actions without user interaction.
+
+\begin{designbox}
+\textbf{Design Principle: Proof of User Action}
+
+Privileged operations require recent input event serials. This proves the user actually interacted, preventing applications from performing actions autonomously.
+\end{designbox}
+
+\section{Surface Roles}
+
+\subsection{Role Concept}
+
+Surfaces are generic until assigned a role:
+
+\begin{itemize}
+    \item \textbf{xdg\_toplevel}: Regular window
+    \item \textbf{xdg\_popup}: Menu or tooltip
+    \item \textbf{subsurface}: Child of another surface
+    \item \textbf{layer\_shell}: Desktop shell component (compositor-specific)
+    \item \textbf{cursor}: Mouse cursor
+\end{itemize}
+
+\subsection{Role Assignment}
+
+Roles are assigned once and cannot change:
+
+\begin{lstlisting}[style=cstyle, caption=Assigning Roles]
+// Create base surface
+struct wl_surface *surface = wl_compositor_create_surface(compositor);
+
+// Assign xdg_toplevel role
+struct xdg_surface *xdg_surface =
+    xdg_wm_base_get_xdg_surface(xdg_wm_base, surface);
+struct xdg_toplevel *toplevel =
+    xdg_surface_get_toplevel(xdg_surface);
+
+// Now surface is a toplevel window
+\end{lstlisting}
+
+\begin{warningbox}
+Once a role is assigned, it cannot be changed. Attempting to assign a different role is a protocol error that will terminate the connection.
+\end{warningbox}
+
+\subsection{Role-Specific Behavior}
+
+Different roles have different properties:
+
+\paragraph{Toplevel}
+\begin{itemize}
+    \item Can be maximized/minimized
+    \item Has title and app\_id
+    \item Receives configure events with size
+    \item Can request fullscreen
+\end{itemize}
+
+\paragraph{Popup}
+\begin{itemize}
+    \item Positioned relative to parent
+    \item Requires grab serial (must be triggered by user)
+    \item Auto-dismissed on focus loss
+    \item Cannot be independently moved by user
+\end{itemize}
+
+\paragraph{Subsurface}
+\begin{itemize}
+    \item Positioned relative to parent
+    \item Can be above or below parent
+    \item Synchronized or desynchronized commits
+    \item No independent focus
+\end{itemize}
+
+\section{Coordinate Systems}
+
+\subsection{Multiple Coordinate Spaces}
+
+Wayland has several coordinate systems:
+
+\paragraph{Surface Coordinates}
+Logical coordinates in the surface:
+\begin{itemize}
+    \item Origin at top-left
+    \item In surface-local units
+    \item Affected by buffer scale
+\end{itemize}
+
+\paragraph{Buffer Coordinates}
+Physical pixel coordinates in the buffer:
+\begin{itemize}
+    \item Origin at top-left
+    \item Actual pixel positions
+    \item May differ from surface coordinates if scaled
+\end{itemize}
+
+\paragraph{Output Coordinates}
+Position on a physical output:
+\begin{itemize}
+    \item Global desktop coordinates
+    \item Multiple outputs have different positions
+    \item Compositor-managed
+\end{itemize}
+
+\subsection{Buffer Scale}
+
+High-DPI displays use buffer scaling:
+
+\begin{lstlisting}[style=cstyle, caption=Buffer Scale]
+// For 2x HiDPI display
+wl_surface_set_buffer_scale(surface, 2);
+
+// Buffer is 1920x1080 pixels
+// Surface is 960x540 logical units
+// Compositor scales appropriately
+\end{lstlisting}
+
+\subsection{Transforms}
+
+Buffers can be rotated:
+
+\begin{lstlisting}[style=cstyle, caption=Buffer Transform]
+wl_surface_set_buffer_transform(surface,
+                                WL_OUTPUT_TRANSFORM_90);
+\end{lstlisting}
+
+Useful for handling phone rotation or unusual display orientations.
+
+\section{Subsurfaces and Hierarchies}
+
+\subsection{Surface Composition}
+
+Complex windows are built from multiple surfaces:
+
+\begin{lstlisting}[style=cstyle, caption=Creating Subsurfaces]
+// Main window surface
+struct wl_surface *main_surface = /* ... */;
+
+// Video playback subsurface
+struct wl_surface *video_surface =
+    wl_compositor_create_surface(compositor);
+
+struct wl_subsurface *subsurface =
+    wl_subcompositor_get_subsurface(
+        subcompositor, video_surface, main_surface);
+
+// Position relative to parent
+wl_subsurface_set_position(subsurface, x, y);
+\end{lstlisting}
+
+\subsection{Stacking Order}
+
+Subsurfaces can be above or below parent:
+
+\begin{lstlisting}[style=cstyle, caption=Subsurface Stacking]
+wl_subsurface_place_above(subsurface, sibling);
+wl_subsurface_place_below(subsurface, sibling);
+\end{lstlisting}
+
+\subsection{Synchronized Commits}
+
+Subsurfaces can have synchronized commits:
+
+\begin{lstlisting}[style=cstyle, caption=Synchronization]
+// Synchronized: commits apply when parent commits
+wl_subsurface_set_sync(subsurface);
+
+wl_surface_commit(video_surface);
+wl_surface_commit(main_surface); // Both update together
+
+// Desynchronized: commits apply immediately
+wl_subsurface_set_desync(subsurface);
+\end{lstlisting}
+
+Synchronized ensures parent and children update atomically.
+
+\section{Summary}
+
+Wayland's design principles create a coherent system:
+
+\begin{enumerate}
+    \item \textbf{Object-oriented protocol}: Clear abstraction, versioning, lifecycle
+    \item \textbf{Asynchronous by default}: Low latency, high throughput
+    \item \textbf{Atomic updates}: No intermediate states, perfect frames
+    \item \textbf{Damage tracking}: Efficiency without compromising correctness
+    \item \textbf{Explicit buffer management}: Clear ownership, predictable behavior
+    \item \textbf{Compositor-controlled focus}: Security, simplicity
+    \item \textbf{Serial-based authentication}: Proof of user action
+    \item \textbf{Surface roles}: Flexibility with type safety
+    \item \textbf{Multiple coordinate systems}: Correct handling of scale and transform
+    \item \textbf{Hierarchical composition}: Complex UIs from simple primitives
+\end{enumerate}
+
+These principles work together to create a system that is:
+\begin{itemize}
+    \item \textbf{Fast}: Asynchronous, zero-copy, optimized for common case
+    \item \textbf{Correct}: Atomic updates, explicit state, clear semantics
+    \item \textbf{Secure}: Isolation by default, authenticated actions
+    \item \textbf{Flexible}: Roles, protocols, compositor freedom
+    \item \textbf{Maintainable}: Clear design, small core, explicit behavior
+\end{itemize}
+
+In the following chapters, we'll see these principles in action as we explore specific protocols and implementations.
+
+\clearpage

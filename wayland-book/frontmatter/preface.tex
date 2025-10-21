@@ -1,0 +1,153 @@
+% Preface
+
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+
+\section*{Why This Book?}
+
+In the world of Linux graphics, we stand at a pivotal moment. For over three decades, the X Window System (X11) has been the foundation of graphical computing on Unix-like systems. It has served us well, enabling the rich graphical environments we enjoy today. But technology evolves, and what was once revolutionary can become a burden.
+
+Wayland represents more than just a replacement for X11—it embodies a fundamental rethinking of how display servers should work in the modern era. It's a clean slate, designed with the benefit of decades of experience, contemporary hardware capabilities, and modern security requirements.
+
+Yet despite its growing adoption, Wayland remains poorly understood. The available documentation, while improving, tends to fall into two extremes: either too shallow (brief introductory articles) or too deep (dense protocol specifications). There's a missing middle ground—a comprehensive guide that explains not just \textit{what} Wayland is, but \textit{why} it was designed this way, \textit{how} it works at multiple levels of abstraction, and \textit{how} to actually build something with it.
+
+This book aims to fill that gap.
+
+\section*{Who This Book Is For}
+
+This book is written for multiple audiences:
+
+\paragraph{Systems Programmers} who want to understand how modern display servers work at a deep technical level. If you've ever wondered how your window manager communicates with your applications, or how pixels get from application memory to your screen, this book is for you.
+
+\paragraph{Compositor Developers} who are building or contributing to Wayland compositors. Whether you're working on a tiling window manager, a desktop environment, or an embedded display system, you'll find detailed information about the Wayland protocol, compositor architecture, and best practices.
+
+\paragraph{Application Developers} who need to understand the Wayland ecosystem to build better applications. While most applications use toolkits that hide Wayland details, understanding the underlying system helps you make better architectural decisions and debug complex issues.
+
+\paragraph{Linux Enthusiasts} who simply want to understand the technology that powers their desktop. If you're curious about the future of Linux graphics and want to peek behind the curtain, this book provides that opportunity.
+
+\paragraph{Students and Educators} looking for a comprehensive resource on modern display server architecture. The concepts in this book span operating systems, computer graphics, network protocols, and software architecture—making it valuable for various computer science curricula.
+
+\section*{What You'll Learn}
+
+This book is structured as a journey from fundamentals to advanced topics:
+
+\textbf{Part I: Understanding the Display Server Problem} sets the stage by explaining what display servers are, why we need them, and how X11 solved (and sometimes failed to solve) these problems. Understanding X11's limitations provides crucial context for appreciating Wayland's design.
+
+\textbf{Part II: The Wayland Vision} explores Wayland's philosophy and design principles. Why is Wayland built the way it is? What problems was it designed to solve? What trade-offs were made? This section helps you think like a Wayland architect.
+
+\textbf{Part III: The Wayland Protocol} dives deep into the technical specification. You'll learn about the core interfaces, how surfaces work, buffer management, and the XML protocol definition language. This is where theory meets specification.
+
+\textbf{Part IV: Building a Compositor} takes you into the world of compositor development. Using wlroots as our reference implementation, we explore scene graphs, output management, window management, and the internal architecture of a modern compositor.
+
+\textbf{Part V: Graphics Pipeline} examines how pixels actually get to the screen. We cover DRM/KMS (Direct Rendering Manager/Kernel Mode Setting), EGL, OpenGL ES, buffer management, and damage tracking—the entire graphics stack from userspace to hardware.
+
+\textbf{Part VI: Input Handling} explores how Wayland handles keyboards, mice, touchscreens, and other input devices. The seat concept, input routing, and event delivery are all explained in detail.
+
+\textbf{Part VII: Practical Implementation} provides hands-on guidance for building your own compositor. We start with a minimal compositor and progressively add features, including XWayland integration, testing strategies, and performance optimization.
+
+\textbf{Part VIII: Advanced Topics} covers color management, high-DPI support, multi-GPU systems, accessibility, and the extended Wayland protocols ecosystem.
+
+\textbf{Part IX: Real-World Case Studies} examines how major compositors (GNOME Mutter, KDE KWin, and Sway) implement Wayland, providing insights into different architectural approaches.
+
+\section*{Prerequisites}
+
+To get the most out of this book, you should have:
+
+\begin{itemize}
+    \item \textbf{Strong C programming skills}. Most Wayland code is written in C, and our examples follow this convention. You should be comfortable with pointers, structs, and manual memory management.
+
+    \item \textbf{Basic Linux knowledge}. Familiarity with the Linux command line, compilation tools (gcc/clang, make/meson), and general Unix concepts.
+
+    \item \textbf{Understanding of event-driven programming}. Wayland is fundamentally event-driven, so experience with event loops and callbacks is helpful.
+
+    \item \textbf{Basic graphics knowledge}. While we explain graphics concepts, some familiarity with 2D graphics, coordinate systems, and rendering will help you follow along more easily.
+\end{itemize}
+
+That said, we don't assume you're an expert in any of these areas. Complex topics are introduced gradually with clear explanations and examples.
+
+\section*{How to Use This Book}
+
+This book is designed to be read in multiple ways:
+
+\paragraph{Cover to Cover} works well if you're new to Wayland and want a comprehensive understanding. Each chapter builds on previous ones, creating a coherent narrative.
+
+\paragraph{Reference Use} is facilitated by extensive cross-references, a detailed index, and self-contained chapters. If you need to understand a specific topic (say, buffer management), you can jump directly to that chapter.
+
+\paragraph{Progressive Reading} allows you to read the parts most relevant to your current needs. Application developers might focus on Parts I-III and skip the compositor implementation details. Compositor developers will want to dive deep into Parts IV-VII.
+
+\section*{Code Examples}
+
+Throughout this book, you'll find numerous code examples. These examples are:
+
+\begin{itemize}
+    \item \textbf{Complete and tested} — not pseudo-code
+    \item \textbf{Available online} — all examples can be downloaded and compiled
+    \item \textbf{Progressively complex} — starting simple and building up
+    \item \textbf{Well-commented} — explaining not just what, but why
+\end{itemize}
+
+The examples are designed to be educational first and practical second. In some cases, we prioritize clarity over efficiency to make concepts easier to understand.
+
+\section*{Conventions Used}
+
+This book uses several typographic conventions:
+
+\begin{itemize}
+    \item \texttt{Monospace text} indicates code, function names, interface names, and protocol elements
+    \item \textbf{Bold text} emphasizes important concepts or terms being defined
+    \item \textit{Italic text} provides emphasis or introduces new terminology
+\end{itemize}
+
+Special boxes highlight important information:
+
+\begin{notebox}
+Notes provide additional context, historical information, or clarifications that enhance understanding without being essential to the main narrative.
+\end{notebox}
+
+\begin{warningbox}
+Warnings alert you to common mistakes, security issues, or potential problems you should be aware of.
+\end{warningbox}
+
+\begin{importantbox}
+Important boxes highlight critical concepts that you need to understand before proceeding.
+\end{importantbox}
+
+\begin{examplebox}
+Examples provide concrete illustrations of abstract concepts, often using analogies or simplified scenarios.
+\end{examplebox}
+
+\begin{designbox}
+Design Decision boxes explain why Wayland was designed a particular way, often contrasting with alternative approaches or X11's design.
+\end{designbox}
+
+\section*{About the Author}
+
+This book is maintained by 1ay1 (\url{https://github.com/1ay1}). It represents years of working with Linux graphics systems, from debugging X11 configuration files to building custom Wayland compositors. This is the guide that was needed when starting this journey—the culmination of reading thousands of pages of documentation, studying numerous codebases, participating in community discussions, and building real systems.
+
+The goal isn't just to document Wayland—it's to help you truly understand it.
+
+\section*{Acknowledgments}
+
+This book wouldn't exist without the tireless work of the Wayland community. The protocol developers, compositor authors, toolkit maintainers, and countless contributors have built something remarkable. Special thanks to the wlroots project, which has made compositor development accessible to a new generation of developers.
+
+\section*{Feedback and Errata}
+
+Technology evolves rapidly, and so does Wayland. While every effort has been made to ensure accuracy, errors inevitably slip through. If you find mistakes, have suggestions, or want to provide feedback, please don't hesitate to reach out.
+
+\section*{Let's Begin}
+
+Wayland represents the future of Linux graphics. It's more secure, more efficient, and better suited to modern hardware than its predecessor. But it's also more complex, more distributed, and requires a different way of thinking about display servers.
+
+This book is your guide through that complexity. By the end, you'll not only understand Wayland—you'll be equipped to build with it, contribute to it, and push the boundaries of what's possible.
+
+Welcome to the world of modern display servers. Let's dive in.
+
+\vspace{1cm}
+
+\begin{flushright}
+\textit{1ay1}\\
+\textit{\url{https://github.com/1ay1/wayland_book}}\\
+\textit{\today}
+\end{flushright}
+
+\clearpage

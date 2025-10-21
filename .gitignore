@@ -1,0 +1,78 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.bbl
+*.bcf
+*.blg
+*.run.xml
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.ist
+*.acn
+*.glo
+*.glg
+*.gls
+*.alg
+*.acr
+*.dvi
+*.nav
+*.snm
+*.vrb
+*.xdy
+*.tdo
+
+# Build directories
+wayland-book/auto/
+wayland-book/_minted-*/
+
+# Output files (these should be in releases, not repo)
+*.pdf
+*.epub
+*.mobi
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Python (if using any build scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+ENV/
+
+# Node (if using any tools)
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Build statistics and logs
+build-stats.txt
+*.build.log

@@ -1,0 +1,564 @@
+\chapter{The Limitations of X11}
+\label{ch:limitations-of-x11}
+
+\epigraph{Legacy code is code without tests, but it's also code that people are afraid to change because they don't understand all its implications.}{--- Michael Feathers, paraphrased}
+
+\section{Introduction}
+
+In the previous chapter, we explored X11's history and its remarkable success. For over three decades, X11 has been the backbone of Unix and Linux graphical systems. It enabled the rich desktop environments we use today and proved remarkably adaptable through its extension mechanism.
+
+Yet despite this success—or perhaps because of it—X11 has accumulated fundamental limitations that no amount of extensions can fully address. Understanding these limitations is crucial for appreciating why Wayland was necessary and how its design addresses these problems.
+
+This chapter examines X11's limitations across multiple dimensions: architectural, security, performance, and complexity. Our goal isn't to criticize X11's designers—they made brilliant decisions given the constraints and knowledge of their time—but rather to understand why a clean-slate redesign became necessary.
+
+\begin{importantbox}
+X11's limitations aren't primarily bugs or implementation issues. They're fundamental architectural constraints that stem from assumptions made in the 1980s that no longer match modern computing reality.
+\end{importantbox}
+
+\section{The Network Transparency Burden}
+
+\subsection{The Original Vision}
+
+X11's architecture was built around network transparency. The idea was elegant: applications (X clients) could run on one machine while displaying on another, with the X protocol mediating the communication. This wasn't just a nice feature—it was a core design principle that influenced every aspect of the system.
+
+\begin{examplebox}
+\textbf{The Classic Use Case}
+
+In a university computer lab circa 1990:
+\begin{itemize}
+    \item Expensive workstations sit on desks
+    \item More powerful compute servers sit in a machine room
+    \item Students run programs on the servers (CPU-intensive work)
+    \item Display output appears on their local workstation
+    \item Network bandwidth: maybe 10 Mbps if you're lucky
+\end{itemize}
+
+In this context, X11's design was perfect. Send high-level drawing commands ("draw a rectangle at coordinates X,Y with width W and height H") rather than pixel data. Let the local X server do the actual rendering.
+\end{examplebox}
+
+\subsection{The Modern Reality}
+
+Today's computing landscape is fundamentally different:
+
+\paragraph{Local Applications Dominate}
+Most desktop applications run on the same machine as the display. When was the last time you ran Firefox on a remote server and displayed it locally? The primary use case that justified X11's complexity has become a niche scenario.
+
+\paragraph{Network Bandwidth Has Exploded}
+A modern gigabit network can transfer full-screen 1920×1080 frames at 60 FPS with room to spare. The careful bandwidth optimization that drove X11's design is less critical.
+
+\paragraph{Remote Access Has Changed}
+When we do need remote access today, we use:
+\begin{itemize}
+    \item VNC or RDP (sending compressed pixels)
+    \item Remote desktop solutions (entire desktop streaming)
+    \item SSH with X forwarding (using X11, but it's notoriously slow)
+\end{itemize}
+
+The irony: X11's network transparency, while clever, doesn't actually work well over modern networks for modern applications.
+
+\subsection{The Cost of Network Transparency}
+
+X11's network-centric design imposes costs even when running locally:
+
+\paragraph{Round-Trip Latency}
+Many X11 operations require round-trip communication between client and server, even when both run on the same machine. Want to know a window's current size? Ask the server and wait for a response. This synchronous communication adds latency.
+
+\begin{lstlisting}[style=cstyle, caption=X11 Round-Trip Example]
+// Every query requires waiting for the server
+XWindowAttributes attrs;
+XGetWindowAttributes(display, window, &attrs);
+// Application blocked waiting for server response
+int width = attrs.width;
+\end{lstlisting}
+
+\paragraph{Inefficient Local Communication}
+The X protocol wasn't designed for the case where client and server share the same memory space. Modern systems use tricks like shared memory extensions (MIT-SHM) to work around this, but these are bolted-on optimizations, not fundamental to the architecture.
+
+\paragraph{Protocol Overhead}
+Every drawing operation goes through protocol encoding and decoding, even for local clients. This made sense when reducing network bandwidth was critical. For local applications, it's pure overhead.
+
+\begin{designbox}
+\textbf{Wayland's Approach}
+
+Wayland abandons network transparency as a core design principle. The protocol assumes local communication and is optimized for it. Network transparency can be layered on top (through tools like waypipe or RDP servers) rather than built into the foundation.
+
+This isn't a limitation—it's a recognition that modern remote access is better served by specialized protocols designed for today's networks.
+\end{designbox}
+
+\section{Security Model Failures}
+
+\subsection{The Trust Problem}
+
+X11 was designed in an era when the security threat model was fundamentally different. Users were known, mostly trusted, and the idea that arbitrary applications might be malicious wasn't a primary concern.
+
+The result: X11 has essentially no security between clients.
+
+\subsection{Any Client Can Do Anything}
+
+Once an application connects to your X server, it can:
+
+\paragraph{Read All Keyboard Input}
+Any X client can register to receive all keyboard events, regardless of which window has focus. This means:
+\begin{itemize}
+    \item Keyloggers are trivial to implement
+    \item Password managers can be compromised
+    \item Any application can spy on your typing
+\end{itemize}
+
+\begin{lstlisting}[style=cstyle, caption=Trivial X11 Keylogger]
+// This is frighteningly simple
+Display *display = XOpenDisplay(NULL);
+Window root = DefaultRootWindow(display);
+
+// Grab all keyboard events
+XGrabKeyboard(display, root, True,
+              GrabModeAsync, GrabModeAsync,
+              CurrentTime);
+
+// Now receive every keystroke systemwide
+while (1) {
+    XEvent event;
+    XNextEvent(display, &event);
+    // Log all keystrokes, including passwords
+}
+\end{lstlisting}
+
+\paragraph{Capture Screenshots}
+Any client can read the contents of any window, including windows belonging to other applications:
+
+\begin{lstlisting}[style=cstyle, caption=Reading Other Windows' Content]
+// Get an image of ANY window
+XImage *image = XGetImage(display, some_other_window,
+                          0, 0, width, height,
+                          AllPlanes, ZPixmap);
+// Now you have their pixels
+\end{lstlisting}
+
+This makes secure password entry impossible in X11. A malicious application can screenshot the screen the moment you enter a password.
+
+\paragraph{Inject Fake Input}
+Applications can synthesize keyboard and mouse events that appear to come from real hardware:
+
+\begin{lstlisting}[style=cstyle, caption=Fake Input Injection]
+// Send fake keypresses to other applications
+XTestFakeKeyEvent(display, keycode, True, CurrentTime);
+XTestFakeKeyEvent(display, keycode, False, CurrentTime);
+\end{lstlisting}
+
+This enables:
+\begin{itemize}
+    \item Malware that clicks "OK" on permission dialogs
+    \item Applications that fake user actions
+    \item Automated attacks that appear to be user-initiated
+\end{itemize}
+
+\paragraph{Manipulate Other Windows}
+Clients can:
+\begin{itemize}
+    \item Resize or move other applications' windows
+    \item Change window properties
+    \item Map or unmap (show/hide) windows
+    \item Reparent windows
+\end{itemize}
+
+\subsection{The XACE Bandaid}
+
+X11 developers recognized these security issues and created XACE (X Access Control Extension). It provides hooks for implementing access control policies. The problems:
+
+\begin{enumerate}
+    \item It's optional and rarely enabled
+    \item It's complex to configure correctly
+    \item It's fundamentally working against X11's architecture
+    \item It can't fix the underlying design without breaking compatibility
+\end{enumerate}
+
+\begin{warningbox}
+The security problems aren't implementation bugs—they're architectural. X11's permission model is "all or nothing." If an application can connect to your X server, it has nearly unlimited access.
+\end{warningbox}
+
+\begin{designbox}
+\textbf{Wayland's Security Model}
+
+In Wayland, applications are isolated by default:
+\begin{itemize}
+    \item Applications only receive input when they have focus
+    \item Applications can't read other applications' window contents
+    \item Applications can't inject fake input
+    \item Screen recording and similar privileged operations require explicit permission via portals
+\end{itemize}
+
+This isn't bolted on—it's fundamental to the architecture. The compositor mediates all interactions.
+\end{designbox}
+
+\section{Performance Limitations}
+
+\subsection{The Compositing Problem}
+
+Modern desktop environments universally use compositing: all windows are rendered to off-screen buffers, then combined with effects (transparency, shadows, animations) into the final display image.
+
+X11 wasn't designed for this. It was designed for direct rendering: applications draw directly to the screen.
+
+\subsection{The Composite Extension}
+
+X11 added compositing through the Composite extension (around 2004). The architecture:
+
+\begin{enumerate}
+    \item Applications render to their windows (as before)
+    \item X server copies these to off-screen pixmaps
+    \item Composite manager reads these pixmaps
+    \item Composite manager combines them with effects
+    \item Result is sent back to X server
+    \item X server displays it
+\end{enumerate}
+
+Notice the problem? The rendering path involves:
+\begin{itemize}
+    \item Application → X server
+    \item X server → off-screen pixmap
+    \item X server → composite manager
+    \item Composite manager → X server
+    \item X server → screen
+\end{itemize}
+
+\paragraph{Unnecessary Copies}
+Each step potentially involves copying pixel data. For a 1920×1080 window at 32 bits per pixel, that's nearly 8MB per frame. At 60 FPS, you're copying gigabytes of data unnecessarily.
+
+\paragraph{GPU Context Switching}
+If both the application and compositor use the GPU, the system must switch GPU contexts repeatedly. Each switch involves:
+\begin{itemize}
+    \item Saving the current GPU state
+    \item Loading the new GPU state
+    \item Flushing caches
+    \item Potential pipeline stalls
+\end{itemize}
+
+\paragraph{Synchronization Overhead}
+Coordinating between application rendering, X server processing, and compositor compositing requires careful synchronization. Getting this wrong causes tearing (visible frame boundaries) or stuttering.
+
+\subsection{The DRI2/DRI3 Workarounds}
+
+DRI (Direct Rendering Infrastructure) was added to allow applications to render directly using the GPU, bypassing the X server for better performance. Then DRI2 improved this. Then DRI3 added buffer passing mechanisms.
+
+Each iteration added complexity to work around X11's fundamental architecture: it was designed for the X server to do rendering, but modern applications need direct GPU access.
+
+\begin{designbox}
+\textbf{Wayland's Direct Approach}
+
+In Wayland:
+\begin{enumerate}
+    \item Application renders to a buffer (using GPU if desired)
+    \item Buffer is passed to compositor (zero-copy via handle passing)
+    \item Compositor combines buffers and displays
+\end{enumerate}
+
+No unnecessary copies. No context switching. Direct buffer sharing between application and compositor. The common case (GPU rendering) is the optimized path, not a bolt-on extension.
+\end{designbox}
+
+\subsection{Input Latency}
+
+X11's input path involves multiple steps:
+
+\begin{enumerate}
+    \item Kernel receives input event
+    \item X server reads event
+    \item X server determines target window
+    \item X server sends event to application via protocol
+    \item Application processes event
+    \item Application sends drawing commands to X server
+    \item X server processes drawing commands
+    \item (If compositing) Compositor gets notified
+    \item (If compositing) Compositor re-composites
+    \item Final image displayed
+\end{enumerate}
+
+Each step adds latency. For latency-critical applications (games, musical instruments, drawing tablets), this is problematic.
+
+\section{Architectural Complexity}
+
+\subsection{The Extension Explosion}
+
+X11's extensibility was both its strength and its downfall. Count the extensions:
+
+\begin{itemize}
+    \item SHAPE (non-rectangular windows)
+    \item MIT-SHM (shared memory)
+    \item Xinerama (multi-monitor, legacy)
+    \item XRENDER (modern rendering)
+    \item COMPOSITE (compositing)
+    \item DAMAGE (damage tracking)
+    \item XFIXES (cursor and region handling)
+    \item RANDR (runtime monitor reconfiguration)
+    \item XInput2 (modern input handling)
+    \item GLX (OpenGL integration)
+    \item DRI, DRI2, DRI3 (direct rendering)
+    \item Present (buffer presentation timing)
+    \item SYNC (synchronization primitives)
+    \item XKB (keyboard handling)
+    \item ... and dozens more
+\end{itemize}
+
+Each extension adds:
+\begin{itemize}
+    \item Protocol messages
+    \item State to track
+    \item Interactions with other extensions
+    \item Bugs and edge cases
+    \item Code to maintain
+\end{itemize}
+
+\subsection{The Codebase Problem}
+
+The X.Org server codebase is enormous:
+
+\begin{itemize}
+    \item Hundreds of thousands of lines of C code
+    \item Decades of accumulated cruft
+    \item Code paths that are rarely tested
+    \item Extensions that interact in subtle ways
+    \item Platform-specific hacks
+\end{itemize}
+
+\begin{notebox}
+As of the mid-2010s, the X.Org server contained over 360,000 lines of code. For comparison, the Wayland core protocol specification and libwayland combined are under 30,000 lines.
+\end{notebox}
+
+\paragraph{Nobody Understands It All}
+The codebase is so large and complex that no single person understands all of it. This makes:
+\begin{itemize}
+    \item Bug fixes risky (might break something else)
+    \item New features difficult to add
+    \item Security audits nearly impossible
+    \item Refactoring dangerous
+\end{itemize}
+
+\subsection{Configuration Complexity}
+
+Remember xorg.conf? The infamous X server configuration file that users struggled with for decades?
+
+\begin{lstlisting}[caption=Classic xorg.conf nightmare]
+Section "Device"
+    Identifier "nvidia"
+    Driver "nvidia"
+    Option "NoLogo" "True"
+    Option "RenderAccel" "True"
+    Option "TripleBuffer" "True"
+    # Did you set the BusID correctly?
+    BusID "PCI:1:0:0"
+EndSection
+
+Section "Screen"
+    Identifier "Screen0"
+    Device "nvidia"
+    Monitor "Monitor0"
+    DefaultDepth 24
+    # Hope you got the modeline right...
+    SubSection "Display"
+        Modes "1920x1080" "1680x1050" "1280x1024"
+    EndSubSection
+EndSection
+\end{lstlisting}
+
+While modern X11 has better auto-configuration, the complexity still lurks beneath the surface.
+
+\section{Modern Feature Incompatibilities}
+
+\subsection{High-DPI Displays}
+
+X11 has a concept of DPI (dots per inch), but it's global and static. Modern challenges:
+
+\paragraph{Per-Monitor Scaling}
+User has a 4K laptop display (needs 200\% scaling) and an external 1080p monitor (needs 100\% scaling). X11 can't handle this cleanly—you get one scaling factor for all monitors.
+
+\paragraph{Dynamic DPI Changes}
+Unplug your laptop and move to a different monitor? X11 requires restart or complex reconfiguration.
+
+\paragraph{Fractional Scaling}
+Want 125\% or 150\% scaling? X11's integer-based DPI model makes this awkward.
+
+\subsection{Multi-GPU Systems}
+
+Modern laptops often have:
+\begin{itemize}
+    \item Integrated GPU (power-efficient)
+    \item Discrete GPU (high-performance)
+\end{itemize}
+
+X11's architecture assumes one GPU rendering to one screen. Multi-GPU support (PRIME) was bolted on and involves:
+\begin{itemize}
+    \item Complex configuration
+    \item Copying buffers between GPUs
+    \item Driver-specific hacks
+\end{itemize}
+
+\subsection{Touch and Gesture Input}
+
+X11's input model was designed for keyboards and mice. Touch screens brought:
+\begin{itemize}
+    \item Multi-touch (multiple simultaneous inputs)
+    \item Gestures (swipes, pinches, rotations)
+    \item Touch vs. mouse disambiguation
+\end{itemize}
+
+XInput2 extension added touch support, but it's layered on top of a fundamentally pointer-centric model.
+
+\subsection{Variable Refresh Rate (VRR)}
+
+Modern gaming monitors support VRR (FreeSync/G-Sync)—the display refresh rate synchronizes with the application's frame rate for smooth gameplay.
+
+X11's fixed refresh rate model doesn't accommodate this well. Support exists through extensions, but it's not fundamental to the architecture.
+
+\section{The Window Management Split}
+
+\subsection{Server vs. Window Manager}
+
+X11 separates the display server (X server) from the window manager:
+
+\begin{itemize}
+    \item X server: manages displays, draws pixels, routes input
+    \item Window manager: positions windows, handles decorations, manages focus
+\end{itemize}
+
+This seemed clean in the 1980s, but modern compositing blurs these boundaries:
+
+\paragraph{The Compositor Dilemma}
+Modern "window managers" are actually compositors that:
+\begin{itemize}
+    \item Need to intercept all rendering (server's job)
+    \item Need to control window positioning (WM's job)
+    \item Need to handle effects like transparency (neither's job originally)
+\end{itemize}
+
+The result: the compositor becomes a second display server that sits between applications and the X server, duplicating functionality.
+
+\subsection{The ICCCM and EWMH Complexity}
+
+To coordinate between X server, window manager, and applications, we have:
+
+\paragraph{ICCCM} (Inter-Client Communication Conventions Manual)
+A specification for how X clients should communicate. It's notoriously complex and ambiguous. Developers joke about it being nearly impossible to implement correctly.
+
+\paragraph{EWMH} (Extended Window Manager Hints)
+Built on top of ICCCM, adding modern window management features. More specifications, more properties to track, more edge cases.
+
+The complexity comes from trying to coordinate three separate entities (X server, window manager, application) that all need to agree on window state.
+
+\begin{designbox}
+\textbf{Wayland's Unified Approach}
+
+In Wayland, the compositor is the display server and the window manager. There's no split. The compositor has complete control and knowledge of all windows, eliminating the need for complex inter-client communication protocols.
+\end{designbox}
+
+\section{Global State and Atoms}
+
+\subsection{X11 Atoms}
+
+X11 uses "atoms"—globally unique integers representing string names. Applications and window managers use atoms to communicate via window properties.
+
+The problem:
+\begin{itemize}
+    \item Shared global namespace (atom names can collide)
+    \item Unlimited number of properties on any window
+    \item No type safety (a property could contain any data)
+    \item Applications can read/modify any window's properties
+    \item Race conditions in property updates
+\end{itemize}
+
+\subsection{Global Grab Problem}
+
+X11 allows applications to "grab" the keyboard or pointer globally:
+
+\begin{lstlisting}[style=cstyle, caption=Global Grab]
+XGrabKeyboard(display, window, True,
+              GrabModeAsync, GrabModeAsync,
+              CurrentTime);
+\end{lstlisting}
+
+If an application crashes while holding a grab, your entire session is frozen—no keyboard, no mouse, just a hard reboot.
+
+Screensavers, modal dialogs, and pop-up menus all use grabs. Each one is a potential freeze point.
+
+\section{The Maintenance Burden}
+
+\subsection{Backwards Compatibility}
+
+X11 maintains backwards compatibility aggressively. An X11 application from 1990 should still run today. This is admirable but costly:
+
+\begin{itemize}
+    \item Can't remove old, broken features
+    \item Can't fix architectural mistakes
+    \item Must support ancient code paths
+    \item Security issues persist for compatibility
+\end{itemize}
+
+\subsection{Declining Developer Interest}
+
+Few developers want to work on X.Org server code:
+\begin{itemize}
+    \item Codebase is intimidating
+    \item Architecture is understood to be fundamentally limited
+    \item Wayland is the future, so why invest in X11?
+\end{itemize}
+
+This creates a vicious cycle: less development → more stagnation → less interest.
+
+\section{What X11 Got Right}
+
+Before we conclude, it's important to acknowledge what X11 did brilliantly:
+
+\paragraph{Extensibility}
+The extension mechanism allowed X11 to evolve for decades without breaking compatibility. While it led to complexity, it also enabled longevity.
+
+\paragraph{Stability}
+X11's maturity means most bugs have been found and fixed. It "just works" in most cases.
+
+\paragraph{Ecosystem}
+Decades of applications, tools, and expertise. This is valuable and not easily replaced.
+
+\paragraph{Learning Platform}
+X11's openness has educated generations of developers about display server concepts.
+
+\section{Summary}
+
+X11's limitations stem from fundamental architectural decisions made in a different computing era:
+
+\begin{enumerate}
+    \item \textbf{Network transparency} adds overhead that local applications don't need
+    \item \textbf{Security model} trusts all clients equally, enabling trivial keyloggers and screen scrapers
+    \item \textbf{Performance architecture} wasn't designed for compositing, requiring complex workarounds
+    \item \textbf{Extension complexity} has made the codebase nearly unmaintainable
+    \item \textbf{Split architecture} (server vs. window manager) creates coordination complexity
+    \item \textbf{Modern features} (high-DPI, multi-GPU, touch) are bolted on rather than fundamental
+\end{enumerate}
+
+These aren't criticisms of X11's creators—they made excellent decisions for their time. But computing has fundamentally changed:
+
+\begin{center}
+\begin{tabular}{l|l|l}
+\toprule
+\textbf{Aspect} & \textbf{1980s Assumption} & \textbf{Modern Reality} \\
+\midrule
+Applications & Remote & Local \\
+Graphics & Software rendered & GPU accelerated \\
+Network & Scarce bandwidth & Abundant bandwidth \\
+Security & Trusted users & Hostile applications \\
+Display & One CRT & Multiple, varied displays \\
+Input & Keyboard + mouse & Touch, gestures, tablets \\
+Compositing & Not needed & Universal \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+X11 adapted remarkably well through extensions, but there's a limit to how far you can stretch an architecture before starting fresh becomes more practical than continued adaptation.
+
+That recognition—that a clean-slate redesign was needed—led to Wayland.
+
+\section{Further Reading}
+
+\begin{itemize}
+    \item \textit{Why X11 Needs to Die} by various authors (blog posts and presentations)
+    \item The X.Org mailing list archives (historical discussions of X11 limitations)
+    \item ICCCM and EWMH specifications (to appreciate the complexity)
+    \item \textit{The X Window System Security Model} by Keith Packard
+\end{itemize}
+
+\clearpage

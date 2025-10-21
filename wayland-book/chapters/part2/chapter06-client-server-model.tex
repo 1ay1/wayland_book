@@ -1,0 +1,720 @@
+\chapter{The Client-Server Model}
+\label{ch:client-server-model}
+
+\epigraph{The structure of a system reflects the structure of the organization that built it.}{--- Conway's Law}
+
+\section{Introduction}
+
+At its core, Wayland is a communication protocol between two parties: clients (applications) and servers (compositors). Understanding this client-server relationship is fundamental to working with Wayland, whether you're writing applications or building compositors.
+
+This chapter explores the Wayland client-server model in detail: how connections are established, how messages are exchanged, how objects are managed, and how the event loop coordinates everything.
+
+Unlike traditional client-server models where the relationship is purely request-response, Wayland's model is more nuanced. Both clients and servers can initiate communication, state is distributed, and the relationship is collaborative rather than hierarchical.
+
+\section{Establishing Connections}
+
+\subsection{The Wayland Socket}
+
+Wayland uses Unix domain sockets for communication. These provide:
+\begin{itemize}
+    \item Fast local communication (no TCP/IP overhead)
+    \item File descriptor passing (for buffers and other resources)
+    \item Standard Unix permissions for access control
+    \item Automatic cleanup on process termination
+\end{itemize}
+
+\subsection{Socket Discovery}
+
+Clients discover the compositor's socket through:
+
+\paragraph{Environment Variable}
+The standard location is specified by \texttt{\$WAYLAND\_DISPLAY}:
+
+\begin{lstlisting}[style=cstyle, caption=Finding the Display]
+const char *display_name = getenv("WAYLAND_DISPLAY");
+if (!display_name) {
+    display_name = "wayland-0"; // Default
+}
+\end{lstlisting}
+
+\paragraph{Socket Location}
+The socket is typically in:
+\begin{itemize}
+    \item \texttt{\$XDG\_RUNTIME\_DIR/\$WAYLAND\_DISPLAY}
+    \item Usually: \texttt{/run/user/1000/wayland-0}
+\end{itemize}
+
+\begin{notebox}
+\texttt{\$XDG\_RUNTIME\_DIR} is a per-user directory for runtime files, created by the login manager (systemd-logind, etc.). It's automatically cleaned up on logout and has secure permissions (700).
+\end{notebox}
+
+\subsection{Client Connection}
+
+Clients connect using libwayland:
+
+\begin{lstlisting}[style=cstyle, caption=Connecting to Wayland]
+#include <wayland-client.h>
+
+int main(void) {
+    // Connect to the compositor
+    struct wl_display *display = wl_display_connect(NULL);
+    if (!display) {
+        fprintf(stderr, "Failed to connect to Wayland display\n");
+        return 1;
+    }
+
+    // Connection established
+    printf("Connected to Wayland compositor\n");
+
+    // ... use connection ...
+
+    // Disconnect
+    wl_display_disconnect(display);
+    return 0;
+}
+\end{lstlisting}
+
+\subsection{What Happens During Connection}
+
+\begin{enumerate}
+    \item Client opens Unix domain socket to compositor
+    \item Handshake establishes protocol version
+    \item Client receives initial \texttt{wl\_display} object (ID 1)
+    \item Client requests \texttt{wl\_registry} object (ID 2)
+    \item Compositor advertises available interfaces via registry
+    \item Client binds to needed interfaces
+\end{enumerate}
+
+\section{The Wire Protocol}
+
+\subsection{Message Format}
+
+Wayland messages are binary, not text-based. Each message has:
+
+\paragraph{Header (8 bytes)}
+\begin{itemize}
+    \item Object ID (32 bits): Which object this message is for
+    \item Message size + opcode (32 bits): Combined field
+        \begin{itemize}
+            \item Upper 16 bits: Total message size
+            \item Lower 16 bits: Opcode (which request/event)
+        \end{itemize}
+\end{itemize}
+
+\paragraph{Arguments}
+Variable-length arguments follow the header:
+\begin{itemize}
+    \item \textbf{int/uint}: 32-bit integers
+    \item \textbf{fixed}: Fixed-point decimal (23.8 format)
+    \item \textbf{string}: Length-prefixed UTF-8 string
+    \item \textbf{object}: Object ID reference
+    \item \textbf{new\_id}: New object ID
+    \item \textbf{array}: Length-prefixed byte array
+    \item \textbf{fd}: File descriptor (passed out-of-band)
+\end{itemize}
+
+\subsection{Example Message}
+
+Creating a surface:
+\begin{lstlisting}[style=cstyle, caption=Creating a Surface]
+wl_compositor_create_surface(compositor);
+\end{lstlisting}
+
+Wire format:
+\begin{verbatim}
+[Object ID: 3]           // wl_compositor object
+[Size: 12, Opcode: 0]    // create_surface request
+[New ID: 15]             // New wl_surface object
+\end{verbatim}
+
+\subsection{File Descriptor Passing}
+
+For buffers and similar resources, file descriptors are passed:
+
+\begin{lstlisting}[style=cstyle, caption=Passing File Descriptors]
+// Create shared memory pool
+int fd = create_shm_file(size);
+struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+close(fd); // libwayland duplicates the fd
+\end{lstlisting}
+
+The file descriptor is sent via Unix socket ancillary data (SCM\_RIGHTS), not in the message itself.
+
+\begin{importantbox}
+File descriptors are a precious resource. Always close them after passing to Wayland (libwayland makes its own copy). Failing to do so leaks file descriptors and can exhaust the process limit.
+\end{importantbox}
+
+\subsection{Byte Order}
+
+Wayland uses the host's native byte order. Since Wayland is local-only (Unix domain sockets), both client and server run on the same machine with the same endianness.
+
+\section{The Object System}
+
+\subsection{Object IDs}
+
+Every Wayland object has a unique 32-bit ID:
+\begin{itemize}
+    \item \textbf{1}: Always \texttt{wl\_display} (the connection itself)
+    \item \textbf{2+}: Allocated dynamically
+\end{itemize}
+
+\paragraph{Client-Allocated IDs}
+When clients create objects, they allocate the ID:
+\begin{lstlisting}[style=cstyle, caption=Client Allocates ID]
+// Client picks ID 15 for new surface
+uint32_t id = 15; // Actually allocated by libwayland
+wl_compositor_create_surface(compositor);
+// Message: [compositor_id, opcode, new_id=15]
+\end{lstlisting}
+
+\paragraph{Server-Allocated IDs}
+When servers create objects (rare), they allocate the ID:
+\begin{lstlisting}[style=cstyle, caption=Server Allocates ID]
+// Compositor creates wl_keyboard and tells client the ID
+// Event: [seat_id, capabilities_event, keyboard_id=42]
+\end{lstlisting}
+
+\subsection{Object Lifetime}
+
+Objects have explicit lifecycles:
+
+\paragraph{Creation}
+\begin{itemize}
+    \item Via factory request: \texttt{wl\_compositor.create\_surface}
+    \item Via registry binding: \texttt{wl\_registry.bind}
+    \item Via event: \texttt{wl\_seat.capabilities} (keyboard created)
+\end{itemize}
+
+\paragraph{Usage}
+\begin{itemize}
+    \item Client sends requests to object
+    \item Server sends events from object
+    \item Both reference object by ID
+\end{itemize}
+
+\paragraph{Destruction}
+\begin{itemize}
+    \item Explicit destroy request: \texttt{wl\_surface.destroy}
+    \item Implicit on disconnect: All objects cleaned up
+    \item Some objects self-destruct: \texttt{wl\_callback} after done event
+\end{itemize}
+
+\subsection{Object Proxies}
+
+Libwayland provides proxy objects that hide the wire protocol:
+
+\begin{lstlisting}[style=cstyle, caption=Proxies Hide Protocol Details]
+// wl_surface is actually a pointer to a proxy
+struct wl_surface *surface = wl_compositor_create_surface(compositor);
+
+// Proxy marshals request into wire format
+wl_surface_attach(surface, buffer, 0, 0);
+
+// Behind the scenes:
+// - Looks up object ID for 'surface'
+// - Marshals arguments (buffer ID, 0, 0)
+// - Sends message via socket
+// - Doesn't wait for response (asynchronous)
+\end{lstlisting}
+
+\subsection{The Registry}
+
+The registry is the discovery mechanism for global objects:
+
+\begin{lstlisting}[style=cstyle, caption=Using the Registry]
+struct wl_registry *registry = wl_display_get_registry(display);
+
+static void registry_global(void *data,
+                           struct wl_registry *registry,
+                           uint32_t name,
+                           const char *interface,
+                           uint32_t version) {
+    printf("Global: %s v%d (name=%d)\n", interface, version, name);
+
+    if (strcmp(interface, "wl_compositor") == 0) {
+        struct wl_compositor *comp = wl_registry_bind(
+            registry, name, &wl_compositor_interface, 4);
+        // Now we can use compositor
+    }
+}
+
+static void registry_global_remove(void *data,
+                                   struct wl_registry *registry,
+                                   uint32_t name) {
+    // Global object removed (rare, e.g., monitor unplugged)
+}
+
+struct wl_registry_listener registry_listener = {
+    .global = registry_global,
+    .global_remove = registry_global_remove
+};
+
+wl_registry_add_listener(registry, &registry_listener, NULL);
+wl_display_roundtrip(display); // Wait for all globals to be advertised
+\end{lstlisting}
+
+\section{Requests and Events}
+
+\subsection{Request Direction}
+
+Requests flow from client to server:
+
+\begin{lstlisting}[style=cstyle, caption=Client Requests]
+// Client → Server: "Create a surface"
+struct wl_surface *surface = wl_compositor_create_surface(compositor);
+
+// Client → Server: "Attach this buffer"
+wl_surface_attach(surface, buffer, 0, 0);
+
+// Client → Server: "Commit changes"
+wl_surface_commit(surface);
+\end{lstlisting}
+
+Requests are:
+\begin{itemize}
+    \item Always initiated by client
+    \item Usually asynchronous (no response expected)
+    \item Queued and processed in order
+    \item Can create new objects or modify state
+\end{itemize}
+
+\subsection{Event Direction}
+
+Events flow from server to client:
+
+\begin{lstlisting}[style=cstyle, caption=Server Events]
+// Server → Client: "Keyboard entered this surface"
+static void keyboard_enter(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface,
+                          struct wl_array *keys) {
+    printf("Keyboard focus gained\n");
+}
+
+// Server → Client: "Key was pressed"
+static void keyboard_key(void *data,
+                        struct wl_keyboard *keyboard,
+                        uint32_t serial,
+                        uint32_t time,
+                        uint32_t key,
+                        uint32_t state) {
+    printf("Key %d %s\n", key,
+           state == WL_KEYBOARD_KEY_STATE_PRESSED ? "pressed" : "released");
+}
+
+struct wl_keyboard_listener keyboard_listener = {
+    .keymap = keyboard_keymap,
+    .enter = keyboard_enter,
+    .leave = keyboard_leave,
+    .key = keyboard_key,
+    .modifiers = keyboard_modifiers,
+    .repeat_info = keyboard_repeat_info
+};
+
+wl_keyboard_add_listener(keyboard, &keyboard_listener, data);
+\end{lstlisting}
+
+Events are:
+\begin{itemize}
+    \item Always initiated by server
+    \item Delivered asynchronously
+    \item Handled by client-registered listeners
+    \item Provide information or request client action
+\end{itemize}
+
+\subsection{Bidirectional Communication}
+
+Unlike pure request-response, Wayland allows both parties to initiate:
+
+\begin{verbatim}
+Client                          Server
+  |                               |
+  |-- create_surface ------------>|
+  |                               |
+  |<--- configure ---------------|  (server asks for size)
+  |                               |
+  |-- commit -------------------->|
+  |                               |
+  |<--- frame_done --------------|  (server ready for next frame)
+  |                               |
+  |-- commit -------------------->|
+  |                               |
+\end{verbatim}
+
+\section{Event Loop and Dispatching}
+
+\subsection{The Main Event Loop}
+
+Wayland clients run an event loop:
+
+\begin{lstlisting}[style=cstyle, caption=Basic Event Loop]
+while (running) {
+    // Dispatch pending events
+    wl_display_dispatch_pending(display);
+
+    // Prepare frame
+    draw_frame();
+
+    // Read and dispatch new events (blocks if none)
+    wl_display_dispatch(display);
+}
+\end{lstlisting}
+
+\subsection{Event Dispatching}
+
+\paragraph{wl\_display\_dispatch}
+Blocks until events arrive, then processes them:
+\begin{lstlisting}[style=cstyle]
+// Blocks until at least one event arrives
+int ret = wl_display_dispatch(display);
+if (ret == -1) {
+    // Connection error
+    handle_error();
+}
+\end{lstlisting}
+
+\paragraph{wl\_display\_dispatch\_pending}
+Processes only already-received events (non-blocking):
+\begin{lstlisting}[style=cstyle]
+// Process buffered events without blocking
+wl_display_dispatch_pending(display);
+\end{lstlisting}
+
+\paragraph{wl\_display\_flush}
+Sends pending requests to compositor:
+\begin{lstlisting}[style=cstyle]
+// Ensure all queued requests are sent
+wl_display_flush(display);
+\end{lstlisting}
+
+\subsection{Integration with Other Event Loops}
+
+For applications using external event loops (GLib, Qt, etc.):
+
+\begin{lstlisting}[style=cstyle, caption=File Descriptor Integration]
+// Get Wayland connection file descriptor
+int fd = wl_display_get_fd(display);
+
+// Add to event loop (e.g., poll/epoll)
+struct pollfd pfd = {
+    .fd = fd,
+    .events = POLLIN
+};
+
+while (running) {
+    // Prepare Wayland events
+    while (wl_display_prepare_read(display) != 0) {
+        wl_display_dispatch_pending(display);
+    }
+
+    wl_display_flush(display);
+
+    // Wait for events
+    poll(&pfd, 1, -1);
+
+    if (pfd.revents & POLLIN) {
+        wl_display_read_events(display);
+        wl_display_dispatch_pending(display);
+    } else {
+        wl_display_cancel_read(display);
+    }
+}
+\end{lstlisting}
+
+\subsection{Event Queues}
+
+For multi-threaded applications, separate event queues prevent race conditions:
+
+\begin{lstlisting}[style=cstyle, caption=Event Queues]
+// Create separate queue for thread
+struct wl_event_queue *queue = wl_display_create_queue(display);
+
+// Assign objects to queue
+wl_proxy_set_queue((struct wl_proxy *)surface, queue);
+
+// In thread: dispatch only this queue's events
+wl_display_dispatch_queue(display, queue);
+\end{lstlisting}
+
+\section{Synchronization Mechanisms}
+
+\subsection{Asynchronous by Default}
+
+Most operations are fire-and-forget:
+
+\begin{lstlisting}[style=cstyle, caption=Asynchronous Requests]
+wl_surface_attach(surface, buffer, 0, 0);
+wl_surface_damage(surface, 0, 0, width, height);
+wl_surface_commit(surface);
+// Continues immediately, compositor processes in parallel
+prepare_next_frame();
+\end{lstlisting}
+
+\subsection{Explicit Synchronization}
+
+When synchronization is needed:
+
+\paragraph{Roundtrip}
+Force synchronization point:
+\begin{lstlisting}[style=cstyle, caption=Roundtrip]
+// Send all pending requests and wait for server to process
+wl_display_roundtrip(display);
+// Now we know all previous requests have been handled
+\end{lstlisting}
+
+How it works:
+\begin{enumerate}
+    \item Client sends \texttt{wl\_display.sync} request
+    \item Server processes all pending requests
+    \item Server sends \texttt{wl\_callback.done} event
+    \item Client knows synchronization is complete
+\end{enumerate}
+
+\paragraph{Callbacks}
+Async notification when operation completes:
+\begin{lstlisting}[style=cstyle, caption=Sync Callback]
+struct wl_callback *callback = wl_display_sync(display);
+
+static void sync_done(void *data,
+                     struct wl_callback *callback,
+                     uint32_t callback_data) {
+    printf("Sync point reached\n");
+    wl_callback_destroy(callback);
+}
+
+struct wl_callback_listener sync_listener = {
+    .done = sync_done
+};
+
+wl_callback_add_listener(callback, &sync_listener, NULL);
+\end{lstlisting}
+
+\subsection{Frame Synchronization}
+
+For animation, sync with compositor's frame rate:
+
+\begin{lstlisting}[style=cstyle, caption=Frame Callbacks]
+static void frame_done(void *data,
+                      struct wl_callback *callback,
+                      uint32_t time) {
+    wl_callback_destroy(callback);
+
+    // Render next frame
+    render_frame();
+
+    // Attach and commit
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_damage(surface, 0, 0, width, height);
+
+    // Request next frame callback
+    struct wl_callback *next = wl_surface_frame(surface);
+    wl_callback_add_listener(next, &frame_listener, data);
+
+    wl_surface_commit(surface);
+}
+
+struct wl_callback_listener frame_listener = {
+    .done = frame_done
+};
+
+// Initial frame request
+struct wl_callback *callback = wl_surface_frame(surface);
+wl_callback_add_listener(callback, &frame_listener, data);
+wl_surface_commit(surface);
+\end{lstlisting}
+
+\section{Error Handling}
+
+\subsection{Protocol Errors}
+
+Protocol violations are fatal:
+
+\begin{lstlisting}[style=cstyle, caption=Detecting Protocol Errors]
+if (wl_display_dispatch(display) == -1) {
+    uint32_t error = wl_display_get_error(display);
+
+    if (error == EPROTO) {
+        uint32_t code, id;
+        const struct wl_interface *interface;
+
+        code = wl_display_get_protocol_error(display, &interface, &id);
+
+        fprintf(stderr, "Protocol error %d on %s@%d\n",
+                code, interface->name, id);
+    }
+}
+\end{lstlisting}
+
+Common protocol errors:
+\begin{itemize}
+    \item Invalid object ID
+    \item Wrong interface version
+    \item Invalid arguments
+    \item Role already assigned
+    \item Unauthorized operation
+\end{itemize}
+
+\subsection{Compositor Errors}
+
+Compositor can send error events:
+
+\begin{lstlisting}[style=cstyle, caption=Display Error Event]
+static void display_error(void *data,
+                         struct wl_display *display,
+                         void *object_id,
+                         uint32_t code,
+                         const char *message) {
+    fprintf(stderr, "Compositor error: %s (code %d)\n", message, code);
+    // Connection will be terminated
+}
+
+struct wl_display_listener display_listener = {
+    .error = display_error,
+    .delete_id = display_delete_id
+};
+
+wl_display_add_listener(display, &display_listener, NULL);
+\end{lstlisting}
+
+\subsection{Graceful Degradation}
+
+Handle missing features gracefully:
+
+\begin{lstlisting}[style=cstyle, caption=Feature Detection]
+static void registry_global(void *data,
+                           struct wl_registry *registry,
+                           uint32_t name,
+                           const char *interface,
+                           uint32_t version) {
+    if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0) {
+        // DMA-BUF supported, use zero-copy
+        use_dmabuf = true;
+    }
+}
+
+// Later
+if (use_dmabuf) {
+    create_dmabuf_buffer();
+} else {
+    // Fall back to shared memory
+    create_shm_buffer();
+}
+\end{lstlisting}
+
+\section{Multi-Threading Considerations}
+
+\subsection{Thread Safety}
+
+libwayland is \textbf{not} thread-safe by default. Options:
+
+\paragraph{Single Thread (Recommended)}
+Do all Wayland operations in one thread:
+\begin{lstlisting}[style=cstyle]
+// Rendering thread
+while (running) {
+    wl_display_dispatch_pending(display);
+    render_frame();
+    wl_display_flush(display);
+}
+\end{lstlisting}
+
+\paragraph{Event Queues}
+Use separate queues for different threads:
+\begin{lstlisting}[style=cstyle, caption=Per-Thread Queues]
+// Thread 1
+struct wl_event_queue *queue1 = wl_display_create_queue(display);
+wl_display_dispatch_queue(display, queue1);
+
+// Thread 2
+struct wl_event_queue *queue2 = wl_display_create_queue(display);
+wl_display_dispatch_queue(display, queue2);
+\end{lstlisting}
+
+\paragraph{External Synchronization}
+Protect with mutexes:
+\begin{lstlisting}[style=cstyle, caption=Manual Locking]
+pthread_mutex_t wayland_mutex;
+
+// Thread 1
+pthread_mutex_lock(&wayland_mutex);
+wl_surface_attach(surface, buffer, 0, 0);
+wl_surface_commit(surface);
+pthread_mutex_unlock(&wayland_mutex);
+
+// Thread 2
+pthread_mutex_lock(&wayland_mutex);
+wl_display_dispatch(display);
+pthread_mutex_unlock(&wayland_mutex);
+\end{lstlisting}
+
+\begin{warningbox}
+Incorrect multi-threading leads to race conditions, corrupted messages, and crashes. When in doubt, use a single thread for all Wayland operations.
+\end{warningbox}
+
+\section{Best Practices}
+
+\subsection{Connection Management}
+
+\begin{enumerate}
+    \item Check connection success
+    \item Set up error handlers early
+    \item Clean up on exit
+    \item Handle disconnection gracefully
+\end{enumerate}
+
+\subsection{Object Lifecycle}
+
+\begin{enumerate}
+    \item Track all created objects
+    \item Destroy in reverse order of creation
+    \item Don't use objects after destruction
+    \item Handle global removal events
+\end{enumerate}
+
+\subsection{Event Handling}
+
+\begin{enumerate}
+    \item Register listeners immediately after object creation
+    \item Handle all events (even "impossible" ones)
+    \item Don't perform heavy work in event handlers
+    \item Queue work for later processing if needed
+\end{enumerate}
+
+\subsection{Performance}
+
+\begin{enumerate}
+    \item Batch requests before flushing
+    \item Use asynchronous operations
+    \item Avoid unnecessary roundtrips
+    \item Reuse buffers when possible
+    \item Use damage tracking to minimize updates
+\end{enumerate}
+
+\section{Summary}
+
+The Wayland client-server model is characterized by:
+
+\begin{enumerate}
+    \item \textbf{Unix sockets}: Fast, local, file descriptor passing
+    \item \textbf{Binary protocol}: Efficient wire format
+    \item \textbf{Object-oriented}: IDs, interfaces, lifecycle
+    \item \textbf{Bidirectional}: Requests and events
+    \item \textbf{Asynchronous}: Non-blocking by default
+    \item \textbf{Event-driven}: Callbacks for responses
+    \item \textbf{Explicit}: Clear state, ownership, synchronization
+\end{enumerate}
+
+Key differences from X11:
+\begin{itemize}
+    \item No global state (everything is objects)
+    \item No synchronous queries (asynchronous events)
+    \item No client-to-client communication (compositor mediates)
+    \item Local-only (no network transparency overhead)
+\end{itemize}
+
+Understanding this model is essential for both application development and compositor implementation. The protocol is simple but powerful, enabling efficient, secure communication between clients and compositors.
+
+In the next chapter, we'll explore Wayland's security model in detail, seeing how the client-server architecture enforces isolation and protection.
+
+\clearpage

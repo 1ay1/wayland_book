@@ -1,0 +1,756 @@
+\chapter{Security Model}
+\label{ch:security-model}
+
+\epigraph{Security is not a product, but a process. It's more than designing strong crypto into a system; it's designing the whole system such that all security measures, including cryptography, work together.}{--- Bruce Schneier}
+
+\section{Introduction}
+
+Security in modern computing environments is paramount. Every application running on your system is a potential threat—whether through malicious intent, compromised dependencies, or simple bugs that create vulnerabilities. The display server, sitting at the intersection of all graphical applications and the user's input/output, is a critical security boundary.
+
+X11's security model, as we explored in Chapter 3, is fundamentally broken. Any application can read your keystrokes, capture your screen, and inject fake input. These aren't bugs—they're architectural decisions from an era when security threats looked very different.
+
+Wayland was designed from the ground up with security as a first-class concern. This chapter explores Wayland's security model in depth: how isolation is achieved, what privileges exist, how they're granted, and what attack vectors remain.
+
+\section{The Security Philosophy}
+
+\subsection{Isolation by Default}
+
+Wayland's fundamental security principle: \textbf{Applications are untrusted and isolated by default.}
+
+This means:
+\begin{itemize}
+    \item Applications cannot see each other's content
+    \item Applications cannot intercept each other's input
+    \item Applications cannot control each other's windows
+    \item Applications cannot perform privileged operations without permission
+\end{itemize}
+
+This is a dramatic shift from X11, where applications are trusted by default and restrictions must be explicitly added.
+
+\subsection{Principle of Least Privilege}
+
+Each application receives only the minimum privileges necessary to function:
+
+\begin{itemize}
+    \item \textbf{Input}: Only when focused
+    \item \textbf{Output}: Only their own surfaces
+    \item \textbf{Window management}: Only their own windows
+    \item \textbf{System access}: Via explicit permission grants
+\end{itemize}
+
+Applications cannot escalate privileges on their own—they must request them, and the user (via the compositor) must grant them.
+
+\subsection{Compositor as Trusted Computing Base}
+
+In Wayland's security model, the compositor is the \textbf{Trusted Computing Base (TCB)}—the component that must be secure for the entire system to be secure.
+
+The compositor:
+\begin{itemize}
+    \item Has full access to all input devices
+    \item Can read all surface content
+    \item Controls what's displayed on screen
+    \item Mediates all inter-application communication
+    \item Enforces all security policies
+\end{itemize}
+
+\begin{importantbox}
+The compositor must be trusted. If the compositor is compromised, the entire graphical session is compromised. This is why compositor security and code quality are critical.
+\end{importantbox}
+
+\section{Input Isolation}
+
+\subsection{Focus-Based Input Delivery}
+
+Unlike X11, where any application can receive any input, Wayland delivers input only to focused surfaces.
+
+\paragraph{Keyboard Input}
+Only the surface with keyboard focus receives key events:
+
+\begin{lstlisting}[style=cstyle, caption=Keyboard Focus Events]
+static void keyboard_enter(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface,
+                          struct wl_array *keys) {
+    // This surface now receives keyboard input
+    app->has_keyboard_focus = true;
+}
+
+static void keyboard_leave(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface) {
+    // This surface no longer receives keyboard input
+    app->has_keyboard_focus = false;
+}
+
+static void keyboard_key(void *data,
+                        struct wl_keyboard *keyboard,
+                        uint32_t serial,
+                        uint32_t time,
+                        uint32_t key,
+                        uint32_t state) {
+    // Key event only delivered because we have focus
+    if (app->has_keyboard_focus) {
+        process_key(key, state);
+    }
+}
+\end{lstlisting}
+
+\paragraph{Security Implications}
+
+\begin{itemize}
+    \item \textbf{No keyloggers}: Applications cannot spy on other applications' keyboard input
+    \item \textbf{Secure password entry}: Password managers and login screens are protected
+    \item \textbf{No global hotkey hijacking}: Applications can't steal system hotkeys
+\end{itemize}
+
+\subsection{Pointer Input Isolation}
+
+Pointer (mouse) events are delivered only to the surface under the cursor:
+
+\begin{lstlisting}[style=cstyle, caption=Pointer Enter/Leave]
+static void pointer_enter(void *data,
+                         struct wl_pointer *pointer,
+                         uint32_t serial,
+                         struct wl_surface *surface,
+                         wl_fixed_t surface_x,
+                         wl_fixed_t surface_y) {
+    // Pointer entered this surface
+    app->has_pointer_focus = true;
+}
+
+static void pointer_leave(void *data,
+                         struct wl_pointer *pointer,
+                         uint32_t serial,
+                         struct wl_surface *surface) {
+    // Pointer left this surface
+    app->has_pointer_focus = false;
+}
+
+static void pointer_motion(void *data,
+                          struct wl_pointer *pointer,
+                          uint32_t time,
+                          wl_fixed_t surface_x,
+                          wl_fixed_t surface_y) {
+    // Motion events only while pointer is over our surface
+    if (app->has_pointer_focus) {
+        update_pointer_position(surface_x, surface_y);
+    }
+}
+\end{lstlisting}
+
+\paragraph{Security Benefits}
+
+\begin{itemize}
+    \item Applications can't track mouse movements outside their windows
+    \item Click events are guaranteed to be on the target surface
+    \item No clickjacking between applications
+\end{itemize}
+
+\subsection{Touch Input Isolation}
+
+Touch input follows similar principles:
+
+\begin{itemize}
+    \item Touch events delivered only to the surface at touch coordinates
+    \item Each touch point independently routed
+    \item Applications can't intercept touches on other surfaces
+\end{itemize}
+
+\section{Output Isolation}
+
+\subsection{Surface Content Privacy}
+
+In X11, any application can read any window's pixels via \texttt{XGetImage}. In Wayland, this is impossible.
+
+\paragraph{What Applications Can See}
+
+\begin{itemize}
+    \item \textbf{Own surfaces}: Applications can read their own buffers (they created them)
+    \item \textbf{Nothing else}: Applications cannot read other applications' surfaces
+\end{itemize}
+
+\paragraph{Implementation}
+
+Applications submit buffers to the compositor but never get direct access to the final composited output:
+
+\begin{lstlisting}[style=cstyle, caption=Surface Submission]
+// Application renders to its own buffer
+render_to_buffer(buffer);
+
+// Submit to compositor
+wl_surface_attach(surface, buffer, 0, 0);
+wl_surface_commit(surface);
+
+// Compositor composites all surfaces
+// Application has NO access to the composited result
+\end{lstlisting}
+
+\paragraph{Security Benefits}
+
+\begin{itemize}
+    \item \textbf{No screenshot stealing}: Applications can't capture other apps' content
+    \item \textbf{Protected credentials}: Password dialogs, banking apps safe from capture
+    \item \textbf{Content privacy}: Sensitive information isn't exposed to other apps
+\end{itemize}
+
+\subsection{Screen Recording and Screenshots}
+
+Since applications can't read arbitrary screen content, how do screenshot tools work?
+
+\paragraph{Portal-Based Access}
+
+Modern systems use XDG Desktop Portals:
+
+\begin{lstlisting}[style=cstyle, caption=Screenshot via Portal (D-Bus pseudocode)]
+// Application requests screenshot via portal
+DBusMessage *request = create_screenshot_request();
+send_dbus_message(portal_service, request);
+
+// User sees system dialog: "Allow MyApp to take screenshot?"
+// User clicks "Allow" or "Deny"
+
+// If allowed, portal returns screenshot data
+DBusMessage *response = wait_for_response();
+if (response_allowed(response)) {
+    screenshot_data = get_screenshot_data(response);
+    // Application now has screenshot
+}
+\end{lstlisting}
+
+\paragraph{Security Properties}
+
+\begin{itemize}
+    \item \textbf{User consent}: User explicitly grants permission
+    \item \textbf{Transparent}: User knows what's being captured
+    \item \textbf{Auditable}: System logs permission grants
+    \item \textbf{Revocable}: Permissions can be revoked
+\end{itemize}
+
+\paragraph{Compositor-Specific Extensions}
+
+Trusted applications (like the compositor's own screenshot tool) can use compositor-specific protocols:
+
+\begin{lstlisting}[style=cstyle, caption=wlr-screencopy Protocol]
+// wlroots-based compositors provide screencopy protocol
+struct zwlr_screencopy_frame_v1 *frame =
+    zwlr_screencopy_manager_v1_capture_output(
+        screencopy_manager, output);
+
+// Compositor provides output content
+// Only available to trusted/authorized clients
+\end{lstlisting}
+
+\section{Window Management Isolation}
+
+\subsection{No Cross-Application Window Manipulation}
+
+In X11, applications can:
+\begin{itemize}
+    \item Move other applications' windows
+    \item Resize other applications' windows
+    \item Change window properties
+    \item Map/unmap (show/hide) windows
+    \item Force focus changes
+\end{itemize}
+
+In Wayland, none of this is possible.
+
+\subsection{Compositor-Controlled Geometry}
+
+Window position and size are entirely compositor-controlled:
+
+\begin{lstlisting}[style=cstyle, caption=Window Configuration]
+static void xdg_toplevel_configure(void *data,
+                                   struct xdg_toplevel *toplevel,
+                                   int32_t width,
+                                   int32_t height,
+                                   struct wl_array *states) {
+    // Compositor tells us our size
+    // We don't control position or final size
+    app->width = width;
+    app->height = height;
+
+    // Check states (maximized, fullscreen, etc.)
+    bool is_maximized = check_state(states, XDG_TOPLEVEL_STATE_MAXIMIZED);
+}
+\end{lstlisting}
+
+\paragraph{Security Benefits}
+
+\begin{itemize}
+    \item \textbf{No window spoofing}: Apps can't position windows to trick users
+    \item \textbf{No focus stealing}: Apps can't force themselves to the foreground
+    \item \textbf{No denial of service}: Apps can't resize/move others to unusable states
+\end{itemize}
+
+\subsection{Application Requests vs. Compositor Decisions}
+
+Applications can \textit{request} certain states but the compositor makes final decisions:
+
+\begin{lstlisting}[style=cstyle, caption=Requesting Fullscreen]
+// Application requests fullscreen
+xdg_toplevel_set_fullscreen(toplevel, output);
+
+// Compositor might:
+// - Honor the request (game on dedicated output)
+// - Deny the request (user policy prevents fullscreen)
+// - Delay the request (other fullscreen app active)
+
+// Application learns the result via configure event
+static void xdg_toplevel_configure(void *data,
+                                   struct xdg_toplevel *toplevel,
+                                   int32_t width,
+                                   int32_t height,
+                                   struct wl_array *states) {
+    bool is_fullscreen = check_state(states, XDG_TOPLEVEL_STATE_FULLSCREEN);
+    if (is_fullscreen) {
+        // Compositor granted fullscreen
+    } else {
+        // Compositor denied fullscreen
+    }
+}
+\end{lstlisting}
+
+\section{Serial-Based Authentication}
+
+\subsection{The Problem of Autonomous Actions}
+
+Some operations should only happen in response to user actions:
+\begin{itemize}
+    \item Opening popup menus (should be from clicking)
+    \item Creating drag-and-drop operations (should be from dragging)
+    \item Moving windows (should be from titlebar drag)
+\end{itemize}
+
+Without protection, malicious applications could perform these actions autonomously, tricking users.
+
+\subsection{Serial Numbers}
+
+Wayland input events include serial numbers:
+
+\begin{lstlisting}[style=cstyle, caption=Input Event Serials]
+static void pointer_button(void *data,
+                          struct wl_pointer *pointer,
+                          uint32_t serial,  // ← Serial number
+                          uint32_t time,
+                          uint32_t button,
+                          uint32_t state) {
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        // Store serial for later use
+        app->last_input_serial = serial;
+    }
+}
+\end{lstlisting}
+
+\subsection{Serial-Authenticated Operations}
+
+Operations requiring user action must provide a recent serial:
+
+\begin{lstlisting}[style=cstyle, caption=Creating a Popup]
+static void pointer_button(void *data,
+                          struct wl_pointer *pointer,
+                          uint32_t serial,
+                          uint32_t time,
+                          uint32_t button,
+                          uint32_t state) {
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED && button == BTN_RIGHT) {
+        // Create popup using this event's serial
+        struct xdg_positioner *positioner = create_positioner();
+        struct xdg_popup *popup = xdg_surface_get_popup(
+            popup_surface, parent_surface, positioner);
+
+        // Serial proves this popup was triggered by actual user input
+        xdg_popup_grab(popup, seat, serial);
+    }
+}
+\end{lstlisting}
+
+\subsection{Security Properties}
+
+\begin{itemize}
+    \item \textbf{Proof of interaction}: Serial proves user actually interacted
+    \item \textbf{Recency}: Serials are time-limited, preventing old events from being reused
+    \item \textbf{Unforgeable}: Applications can't generate valid serials
+    \item \textbf{Per-seat}: Serials are seat-specific, preventing cross-seat attacks
+\end{itemize}
+
+\begin{warningbox}
+The compositor validates serials. Providing an invalid or expired serial results in the operation being denied and potentially a protocol error.
+\end{warningbox}
+
+\section{Clipboard and Selection Security}
+
+\subsection{X11's Global Clipboard Problem}
+
+In X11, the clipboard/selection system allows:
+\begin{itemize}
+    \item Any application to read the clipboard at any time
+    \item Any application to overwrite the clipboard
+    \item Applications to monitor clipboard changes
+    \item No user awareness of clipboard access
+\end{itemize}
+
+This enables:
+\begin{itemize}
+    \item Password stealing from password managers
+    \item Data exfiltration
+    \item Clipboard injection attacks
+\end{itemize}
+
+\subsection{Wayland's Focus-Based Clipboard}
+
+In Wayland, clipboard access requires focus:
+
+\begin{lstlisting}[style=cstyle, caption=Setting Clipboard Content]
+// Application can set clipboard when it has focus
+if (has_keyboard_focus) {
+    struct wl_data_source *source =
+        wl_data_device_manager_create_data_source(data_device_manager);
+
+    // Offer text/plain MIME type
+    wl_data_source_add_listener(source, &data_source_listener, app);
+    wl_data_source_offer(source, "text/plain");
+
+    // Set as clipboard content
+    wl_data_device_set_selection(data_device, source, serial);
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=cstyle, caption=Reading Clipboard Content]
+// Application can only read clipboard when it receives focus
+static void keyboard_enter(void *data,
+                          struct wl_keyboard *keyboard,
+                          uint32_t serial,
+                          struct wl_surface *surface,
+                          struct wl_array *keys) {
+    app->has_focus = true;
+    // Now we can request clipboard content
+}
+
+// Later, when pasting
+if (has_focus && paste_requested) {
+    // Request clipboard data
+    wl_data_offer_receive(offer, "text/plain", pipe_fd);
+}
+\end{lstlisting}
+
+\subsection{Security Benefits}
+
+\begin{itemize}
+    \item \textbf{No background clipboard reading}: Apps can't spy on clipboard without focus
+    \item \textbf{User awareness}: Clipboard access correlated with visible app usage
+    \item \textbf{Temporal limitation}: Clipboard access limited to focus periods
+\end{itemize}
+
+\subsection{Clipboard Managers}
+
+Clipboard managers that persist clipboard content across application exits require compositor cooperation or special protocols.
+
+\section{Privilege Escalation Mechanisms}
+
+\subsection{XDG Desktop Portals}
+
+Portals provide secure, user-mediated access to privileged operations.
+
+\paragraph{Architecture}
+
+\begin{verbatim}
+Application
+    ↓ (D-Bus)
+Portal Frontend (xdg-desktop-portal)
+    ↓
+Portal Backend (compositor-specific)
+    ↓
+User Permission Dialog
+    ↓
+System Resources
+\end{verbatim}
+
+\paragraph{Available Portals}
+
+\begin{itemize}
+    \item \textbf{Screenshot}: Capture screen content
+    \item \textbf{Screencast}: Record screen video
+    \item \textbf{Remote Desktop}: Full remote control
+    \item \textbf{File Chooser}: Access filesystem (with user selection)
+    \item \textbf{Camera}: Access camera devices
+    \item \textbf{Location}: Access location services
+\end{itemize}
+
+\paragraph{Example: Screenshot Portal}
+
+\begin{lstlisting}[style=cstyle, caption=Using Screenshot Portal]
+// Application makes D-Bus call to portal
+GDBusProxy *proxy = create_screenshot_portal_proxy();
+
+GVariantBuilder builder;
+g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+
+// Request screenshot
+GVariant *result = g_dbus_proxy_call_sync(
+    proxy,
+    "Screenshot",
+    g_variant_new("(ssa{sv})", "", "", &builder),
+    G_DBUS_CALL_FLAGS_NONE,
+    -1,
+    NULL,
+    &error);
+
+// User sees permission dialog
+// If granted, receive handle to screenshot
+\end{lstlisting}
+
+\subsection{Security Properties}
+
+\begin{itemize}
+    \item \textbf{User consent}: Every privileged operation requires explicit permission
+    \item \textbf{Visible}: Permission dialogs clearly explain what's being accessed
+    \item \textbf{Granular}: Permissions are per-operation, not blanket grants
+    \item \textbf{Auditable}: Access is logged and can be reviewed
+    \item \textbf{Revocable}: Permissions can be revoked at any time
+\end{itemize}
+
+\subsection{Wayland Protocols for Privileged Operations}
+
+Some operations use Wayland protocols with compositor enforcement:
+
+\paragraph{Input Method Protocol}
+
+\begin{lstlisting}[style=cstyle, caption=Input Method (Trusted Component)]
+// Input methods (on-screen keyboards, IMEs) need special access
+struct zwp_input_method_v2 *input_method =
+    zwp_input_method_manager_v2_get_input_method(manager, seat);
+
+// This protocol is typically restricted to trusted components
+// Compositor enforces access control
+\end{lstlisting}
+
+\paragraph{Layer Shell (compositor-specific)}
+
+\begin{lstlisting}[style=cstyle, caption=Layer Shell for Desktop Components]
+// Desktop shell components (panels, docks) need special placement
+struct zwlr_layer_surface_v1 *layer_surface =
+    zwlr_layer_shell_v1_get_layer_surface(
+        layer_shell, surface, output,
+        ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
+
+// Compositor may restrict this protocol to trusted applications
+\end{lstlisting}
+
+\section{Process Isolation and Sandboxing}
+
+\subsection{Wayland and Sandboxing}
+
+Wayland's isolation properties make it ideal for sandboxed applications:
+
+\paragraph{Flatpak Integration}
+
+\begin{itemize}
+    \item Applications run in containers with limited access
+    \item Wayland socket can be safely passed into container
+    \item Application can't escape sandbox via Wayland
+    \item Portal access for privileged operations
+\end{itemize}
+
+\paragraph{Snap Integration}
+
+Similar isolation with:
+\begin{itemize}
+    \item Wayland interface mediation
+    \item Portal-based privileged access
+    \item No escape via display server
+\end{itemize}
+
+\subsection{Security Boundaries}
+
+\begin{verbatim}
+┌─────────────────────────────────────────────────┐
+│ Trusted Computing Base                          │
+│                                                 │
+│  ┌────────────┐  ┌──────────────────────────┐  │
+│  │  Kernel    │  │  Compositor              │  │
+│  │  - DRM/KMS │  │  - Input routing         │  │
+│  │  - Input   │  │  - Output composition    │  │
+│  │  - GPU     │  │  - Security enforcement  │  │
+│  └────────────┘  └──────────────────────────┘  │
+│                                                 │
+└─────────────────────────────────────────────────┘
+                      ↕
+        ┌─────────────────────────────┐
+        │    Security Boundary        │
+        └─────────────────────────────┘
+                      ↕
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│ Application  │  │ Application  │  │ Application  │
+│ (Isolated)   │  │ (Isolated)   │  │ (Isolated)   │
+└──────────────┘  └──────────────┘  └──────────────┘
+\end{verbatim}
+
+\section{Remaining Attack Vectors}
+
+\subsection{Compositor Vulnerabilities}
+
+The compositor is the TCB. Vulnerabilities in the compositor can compromise the entire session:
+
+\begin{itemize}
+    \item \textbf{Buffer overflow}: In buffer handling code
+    \item \textbf{Use-after-free}: In object lifecycle management
+    \item \textbf{Integer overflow}: In size calculations
+    \item \textbf{Logic errors}: In permission checks
+\end{itemize}
+
+\paragraph{Mitigation}
+
+\begin{itemize}
+    \item Code auditing
+    \item Fuzzing
+    \item Memory-safe languages (some compositors use Rust)
+    \item Minimal attack surface
+    \item Regular security updates
+\end{itemize}
+
+\subsection{Timing Attacks}
+
+Applications might infer information from timing:
+
+\begin{itemize}
+    \item Frame timing reveals when screen updates
+    \item Could theoretically infer other applications' activity
+\end{itemize}
+
+\paragraph{Mitigation}
+
+\begin{itemize}
+    \item Constant-time operations where security-relevant
+    \item Noise injection in timing-sensitive operations
+\end{itemize}
+
+\subsection{Side Channels}
+
+Other side channels exist:
+
+\paragraph{GPU Resources}
+
+\begin{itemize}
+    \item GPU memory exhaustion
+    \item Inference via GPU cache timing
+\end{itemize}
+
+\paragraph{System Resources}
+
+\begin{itemize}
+    \item CPU usage observation
+    \item Memory usage patterns
+    \item Shared system state
+\end{itemize}
+
+These are generally OS-level concerns, not specific to Wayland.
+
+\subsection{Social Engineering}
+
+Technical security doesn't prevent:
+
+\begin{itemize}
+    \item UI spoofing within an application's own windows
+    \item Misleading permission requests
+    \item Phishing-style attacks
+\end{itemize}
+
+These require user education and careful UI design.
+
+\section{Comparison with X11}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{0.3\textwidth}|p{0.3\textwidth}|p{0.3\textwidth}}
+\toprule
+\textbf{Threat} & \textbf{X11} & \textbf{Wayland} \\
+\midrule
+Keylogging & Trivial & Impossible (without compositor) \\
+Screen capture & Trivial & Requires permission \\
+Fake input injection & Trivial & Impossible \\
+Window manipulation & Trivial & Impossible \\
+Clipboard stealing & Easy & Requires focus \\
+Focus stealing & Easy & Compositor-controlled \\
+Cross-app communication & Unrestricted & Mediated/prevented \\
+Privilege escalation & Global & Per-operation, user-mediated \\
+\bottomrule
+\end{tabular}
+\caption{Security comparison: X11 vs. Wayland}
+\end{table}
+
+\section{Best Practices for Secure Wayland Applications}
+
+\subsection{For Application Developers}
+
+\begin{enumerate}
+    \item \textbf{Use portals}: Don't implement custom privileged access
+    \item \textbf{Minimize permissions}: Request only necessary capabilities
+    \item \textbf{Clear UI}: Make permission requests transparent to users
+    \item \textbf{Validate input}: Don't trust data from compositor (defense in depth)
+    \item \textbf{Handle denial gracefully}: Permission denial should not crash
+\end{enumerate}
+
+\subsection{For Compositor Developers}
+
+\begin{enumerate}
+    \item \textbf{Minimize TCB}: Keep compositor code minimal and auditable
+    \item \textbf{Validate all input}: Check all client requests
+    \item \textbf{Enforce isolation}: Never leak cross-client information
+    \item \textbf{Secure defaults}: Deny by default, allow explicitly
+    \item \textbf{Audit privileged paths}: Extra scrutiny on permission-granting code
+    \item \textbf{Test security}: Fuzzing, penetration testing, code review
+\end{enumerate}
+
+\section{Future Security Enhancements}
+
+\subsection{Ongoing Work}
+
+\begin{itemize}
+    \item \textbf{Security context protocol}: More granular application isolation
+    \item \textbf{Improved portal integration}: More operations via portals
+    \item \textbf{Formal verification}: Mathematical proof of security properties
+    \item \textbf{Memory-safe implementations}: Rust compositors gaining traction
+\end{itemize}
+
+\subsection{Research Directions}
+
+\begin{itemize}
+    \item Information flow tracking
+    \item Trusted path for security-critical UI
+    \item Capability-based security models
+    \item Hardware-backed isolation
+\end{itemize}
+
+\section{Summary}
+
+Wayland's security model represents a fundamental improvement over X11:
+
+\begin{enumerate}
+    \item \textbf{Isolation by default}: Applications cannot interfere with each other
+    \item \textbf{Focus-based input}: Input only to focused applications
+    \item \textbf{Output privacy}: Applications can't read others' content
+    \item \textbf{Serial authentication}: Proof of user interaction required
+    \item \textbf{Compositor as TCB}: Clear security boundary
+    \item \textbf{Portal-based privileges}: User-mediated access to sensitive operations
+    \item \textbf{Sandboxing-friendly}: Integrates well with container isolation
+\end{enumerate}
+
+Key security properties:
+\begin{itemize}
+    \item \textbf{No keyloggers}: Input isolation prevents keystroke capture
+    \item \textbf{No screengrabbers}: Output isolation prevents unauthorized screenshots
+    \item \textbf{No fake input}: Serial requirements prevent input injection
+    \item \textbf{No window manipulation}: Compositor control prevents interference
+    \item \textbf{Explicit permissions}: User awareness and consent for privileged operations
+\end{itemize}
+
+While no system is perfectly secure, Wayland's architecture makes entire classes of attacks impossible and forces remaining attack vectors through well-defined, auditable paths.
+
+The security benefits of Wayland aren't just theoretical—they're practical improvements that protect users every day. As more applications move to Wayland and portals, the Linux desktop becomes significantly more secure.
+
+In the next part of this book, we'll dive into the Wayland protocol itself, seeing how these security principles manifest in concrete protocol design.
+
+\clearpage
